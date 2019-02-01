@@ -11,6 +11,8 @@ VS_VERS=$(filter %.0,$(subst \, ,$(VSINSTALLDIR)))
 endif
 VS_MAJOR=$(word 1,$(subst ., ,$(VS_VERS)))
 
+CMAKE ?= cmake
+
 OPENCV_INSTALL=$(abspath $(TOP))/install/$(EPICS_HOST_ARCH)
 #CMAKE_CONFIG_FLAGS=-DBOOST_ROOT:STRING=$(EPICS_ROOT)/libraries/master/boost -DGSL_INSTALL_MULTI_CONFIG=ON
 CMAKE_BUILD_FLAGS=
@@ -46,18 +48,20 @@ include $(TOP)/configure/RULES
 
 ifdef T_A
 install:
-	cmake $(OPENCV_SRC) -G "$(CMAKE_GENERATOR)" -DCMAKE_INSTALL_PREFIX:PATH="$(OPENCV_INSTALL)" $(CMAKE_CONFIG_FLAGS)
-	cmake --build . --target install --config $(CMAKE_CONFIG) $(CMAKE_BUILD_FLAGS)
+	$(CMAKE) $(OPENCV_SRC) -G "$(CMAKE_GENERATOR)" -DCMAKE_INSTALL_PREFIX:PATH="$(OPENCV_INSTALL)" $(CMAKE_CONFIG_FLAGS)
+	$(CMAKE) --build . --target install --config $(CMAKE_CONFIG) $(CMAKE_BUILD_FLAGS)
 	-$(MKDIR) $(TOP)/bin
 	-$(MKDIR) $(TOP)/bin/$(EPICS_HOST_ARCH)
 	-$(MKDIR) $(TOP)/lib
 	-$(MKDIR) $(TOP)/lib/$(EPICS_HOST_ARCH)
-	-$(RMDIR) $(TOP)/include
-	-$(RMDIR) $(TOP)/include
-	$(MV) -f $(OPENCV_INSTALL)/include $(TOP)
+	$(CMAKE) -E remove_directory $(TOP)/include
+	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include $(TOP)/include
 ifeq ($(findstring linux,$(EPICS_HOST_ARCH)),)
-	$(CP) -f $(OPENCV_INSTALL)/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
-	$(CP) -f $(OPENCV_INSTALL)/lib/*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/*/*/bin/*.exe $(TOP)/bin/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/*/*/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/*/*/lib/*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/*/*/lib/opencv_core*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_core.lib
+	$(CP) -f $(OPENCV_INSTALL)/*/*/lib/opencv_imgproc*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_imgproc.lib
 else
 	$(CP) -f $(OPENCV_INSTALL)/lib*/libopencv* $(TOP)/lib/$(EPICS_HOST_ARCH)/
 endif
