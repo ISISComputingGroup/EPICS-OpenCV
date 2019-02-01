@@ -29,8 +29,10 @@ endif
 CMAKE_GENERATOR=Visual Studio $(VS_ARCH)
 ifeq ($(findstring static,$(EPICS_HOST_ARCH)),)
 CMAKE_CONFIG_FLAGS += -DBUILD_SHARED_LIBS=ON
+WININSTLIB=lib
 else
 CMAKE_CONFIG_FLAGS += -DBUILD_SHARED_LIBS=OFF
+WININSTLIB=staticlib
 endif
 endif
 ifneq ($(findstring debug,$(EPICS_HOST_ARCH)),)
@@ -59,9 +61,9 @@ install:
 ifeq ($(findstring linux,$(EPICS_HOST_ARCH)),)
 	$(CP) -f $(OPENCV_INSTALL)/*/*/bin/*.exe $(TOP)/bin/$(EPICS_HOST_ARCH)/
 	$(CP) -f $(OPENCV_INSTALL)/*/*/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
-	$(CP) -f $(OPENCV_INSTALL)/*/*/lib/*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/
-	$(CP) -f $(OPENCV_INSTALL)/*/*/lib/opencv_core*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_core.lib
-	$(CP) -f $(OPENCV_INSTALL)/*/*/lib/opencv_imgproc*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_imgproc.lib
+	$(CP) -f $(OPENCV_INSTALL)/*/*/$(WININSTLIB)/*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/*/*/$(WININSTLIB)/opencv_core*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_core.lib
+	$(CP) -f $(OPENCV_INSTALL)/*/*/$(WININSTLIB)/opencv_imgproc*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_imgproc.lib
 else
 	$(CP) -f $(OPENCV_INSTALL)/lib*/libopencv* $(TOP)/lib/$(EPICS_HOST_ARCH)/
 endif
