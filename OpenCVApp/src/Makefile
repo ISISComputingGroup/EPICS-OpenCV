@@ -50,7 +50,7 @@ include $(TOP)/configure/RULES
 
 ifdef T_A
 install:
-	$(CMAKE) $(OPENCV_SRC) -G "$(CMAKE_GENERATOR)" -A "$(PLATFORM)" -DCMAKE_INSTALL_PREFIX:PATH="$(OPENCV_INSTALL)" $(CMAKE_CONFIG_FLAGS)
+	$(CMAKE) $(OPENCV_SRC) -G "$(CMAKE_GENERATOR)" -A "$(PLATFORM)" -DOpenCV_INSTALL_BINARIES_PREFIX="" -DCMAKE_INSTALL_PREFIX:PATH="$(OPENCV_INSTALL)" $(CMAKE_CONFIG_FLAGS)
 	$(CMAKE) --build . --target install --config $(CMAKE_CONFIG) $(CMAKE_BUILD_FLAGS)
 	-$(MKDIR) $(TOP)/bin
 	-$(MKDIR) $(TOP)/bin/$(EPICS_HOST_ARCH)
@@ -59,11 +59,11 @@ install:
 	$(CMAKE) -E remove_directory $(TOP)/include
 	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include $(TOP)/include
 ifeq ($(findstring linux,$(EPICS_HOST_ARCH)),)
-	$(CP) -f $(OPENCV_INSTALL)/*/*/bin/*.exe $(TOP)/bin/$(EPICS_HOST_ARCH)/
-	$(CP) -f $(OPENCV_INSTALL)/*/*/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
-	$(CP) -f $(OPENCV_INSTALL)/*/*/$(WININSTLIB)/*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/
-	$(CP) -f $(OPENCV_INSTALL)/*/*/$(WININSTLIB)/opencv_core*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_core.lib
-	$(CP) -f $(OPENCV_INSTALL)/*/*/$(WININSTLIB)/opencv_imgproc*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_imgproc.lib
+	$(CP) -f $(OPENCV_INSTALL)/bin/*.exe $(TOP)/bin/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/$(WININSTLIB)/*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/
+	$(CP) -f $(OPENCV_INSTALL)/$(WININSTLIB)/opencv_core*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_core.lib
+	$(CP) -f $(OPENCV_INSTALL)/$(WININSTLIB)/opencv_imgproc*.lib $(TOP)/lib/$(EPICS_HOST_ARCH)/opencv_imgproc.lib
 else
 	$(CP) -f $(OPENCV_INSTALL)/lib*/libopencv* $(TOP)/lib/$(EPICS_HOST_ARCH)/
 endif
