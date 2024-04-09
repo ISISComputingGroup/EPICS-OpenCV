@@ -230,4 +230,75 @@ PERF_TEST_P(Size_MatType_BorderType, blur5x5,
     SANITY_CHECK(dst, 1);
 }
 
+///////////// BlendLinear ////////////////////////
+PERF_TEST_P(Size_MatType, BlendLinear,
+            testing::Combine(
+                testing::Values(szVGA, sz720p, sz1080p, sz2160p),
+                testing::Values(CV_8UC1, CV_32FC1, CV_8UC3, CV_32FC3, CV_8UC4, CV_32FC4)
+                )
+           )
+{
+    const Size srcSize = get<0>(GetParam());
+    const int srcType = get<1>(GetParam());
+
+    Mat src1(srcSize, srcType), src2(srcSize, srcType), dst(srcSize, srcType);
+    Mat weights1(srcSize, CV_32FC1), weights2(srcSize, CV_32FC1);
+
+    declare.in(src1, src2, WARMUP_RNG).in(weights1, weights2, WARMUP_READ).out(dst);
+    randu(weights1, 0, 1);
+    randu(weights2, 0, 1);
+
+    TEST_CYCLE() blendLinear(src1, src2, weights1, weights2, dst);
+
+    SANITY_CHECK_NOTHING();
+}
+
+///////////// Stackblur ////////////////////////
+PERF_TEST_P(Size_MatType, stackblur3x3,
+            testing::Combine(
+                    testing::Values(sz720p, sz1080p, sz2160p),
+                    testing::Values(CV_8UC1, CV_8UC4, CV_16UC1, CV_16SC1, CV_32FC1)
+            )
+)
+{
+    Size size = get<0>(GetParam());
+    int type = get<1>(GetParam());
+    double eps = 1e-3;
+
+    eps = CV_MAT_DEPTH(type) <= CV_32S ? 1 : eps;
+
+    Mat src(size, type);
+    Mat dst(size, type);
+
+    declare.in(src, WARMUP_RNG).out(dst);
+
+    TEST_CYCLE() stackBlur(src, dst, Size(3,3));
+
+    SANITY_CHECK_NOTHING();
+}
+
+PERF_TEST_P(Size_MatType, stackblur101x101,
+            testing::Combine(
+                    testing::Values(sz720p, sz1080p, sz2160p),
+                    testing::Values(CV_8UC1, CV_8UC4, CV_16UC1, CV_16SC1, CV_32FC1)
+            )
+)
+{
+    Size size = get<0>(GetParam());
+    int type = get<1>(GetParam());
+    double eps = 1e-3;
+
+    eps = CV_MAT_DEPTH(type) <= CV_32S ? 1 : eps;
+
+    Mat src(size, type);
+    Mat dst(size, type);
+
+    declare.in(src, WARMUP_RNG).out(dst);
+
+    TEST_CYCLE() stackBlur(src, dst, Size(101,101));
+
+    SANITY_CHECK_NOTHING();
+}
+
+
 } // namespace

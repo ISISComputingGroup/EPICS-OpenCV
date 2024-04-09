@@ -43,6 +43,8 @@
 #include "precomp.hpp"
 #include "circlesgrid.hpp"
 #include <limits>
+
+ // Requires CMake flag: DEBUG_opencv_calib3d=ON
 //#define DEBUG_CIRCLES
 
 #ifdef DEBUG_CIRCLES
@@ -69,10 +71,6 @@ void drawPoints(const std::vector<Point2f> &points, Mat &outImage, int radius = 
 
 void CirclesGridClusterFinder::hierarchicalClustering(const std::vector<Point2f> &points, const Size &patternSz, std::vector<Point2f> &patternPoints)
 {
-#ifdef HAVE_TEGRA_OPTIMIZATION
-    if(tegra::useTegra() && tegra::hierarchicalClustering(points, patternSz, patternPoints))
-        return;
-#endif
     int j, n = (int)points.size();
     size_t pn = static_cast<size_t>(patternSz.area());
 
@@ -160,7 +158,7 @@ void CirclesGridClusterFinder::findGrid(const std::vector<cv::Point2f> &points, 
 #endif
 
   std::vector<Point2f> hull2f;
-  convexHull(Mat(patternPoints), hull2f, false);
+  convexHull(patternPoints, hull2f, false);
   const size_t cornersCount = isAsymmetricGrid ? 6 : 4;
   if(hull2f.size() < cornersCount)
     return;
@@ -386,15 +384,15 @@ void CirclesGridClusterFinder::rectifyPatternPoints(const std::vector<cv::Point2
 {
   //indices of corner points in pattern
   std::vector<Point> trueIndices;
-  trueIndices.push_back(Point(0, 0));
-  trueIndices.push_back(Point(patternSize.width - 1, 0));
+  trueIndices.emplace_back(0, 0);
+  trueIndices.emplace_back(patternSize.width - 1, 0);
   if(isAsymmetricGrid)
   {
-    trueIndices.push_back(Point(patternSize.width - 1, 1));
-    trueIndices.push_back(Point(patternSize.width - 1, patternSize.height - 2));
+    trueIndices.emplace_back(patternSize.width - 1, 1);
+    trueIndices.emplace_back(patternSize.width - 1, patternSize.height - 2);
   }
-  trueIndices.push_back(Point(patternSize.width - 1, patternSize.height - 1));
-  trueIndices.push_back(Point(0, patternSize.height - 1));
+  trueIndices.emplace_back(patternSize.width - 1, patternSize.height - 1);
+  trueIndices.emplace_back(0, patternSize.height - 1);
 
   std::vector<Point2f> idealPoints;
   for(size_t idx=0; idx<trueIndices.size(); idx++)
@@ -403,15 +401,15 @@ void CirclesGridClusterFinder::rectifyPatternPoints(const std::vector<cv::Point2
     int j = trueIndices[idx].x;
     if(isAsymmetricGrid)
     {
-      idealPoints.push_back(Point2f((2*j + i % 2)*squareSize, i*squareSize));
+      idealPoints.emplace_back((2*j + i % 2)*squareSize, i*squareSize);
     }
     else
     {
-      idealPoints.push_back(Point2f(j*squareSize, i*squareSize));
+      idealPoints.emplace_back(j*squareSize, i*squareSize);
     }
   }
 
-  Mat homography = findHomography(Mat(sortedCorners), Mat(idealPoints), 0);
+  Mat homography = findHomography(sortedCorners, idealPoints, 0);
   Mat rectifiedPointsMat;
   transform(patternPoints, rectifiedPointsMat, homography);
   rectifiedPatternPoints.clear();
@@ -479,7 +477,7 @@ void Graph::addVertex(size_t id)
 {
   CV_Assert( !doesVertexExist( id ) );
 
-  vertices.insert(std::pair<size_t, Vertex> (id, Vertex()));
+  vertices.emplace(id, Vertex());
 }
 
 void Graph::addEdge(size_t id1, size_t id2)
@@ -592,13 +590,9 @@ CirclesGridFinderParameters::CirclesGridFinderParameters()
 
   minRNGEdgeSwitchDist = 5.f;
   gridType = SYMMETRIC_GRID;
-}
 
-CirclesGridFinderParameters2::CirclesGridFinderParameters2()
-: CirclesGridFinderParameters()
-{
-    squareSize = 1.0f;
-    maxRectifiedDistance = squareSize/2.0f;
+  squareSize = 1.0f;
+  maxRectifiedDistance = squareSize/2.0f;
 }
 
 CirclesGridFinder::CirclesGridFinder(Size _patternSize, const std::vector<Point2f> &testKeypoints,
@@ -871,8 +865,8 @@ Mat CirclesGridFinder::rectifyGrid(Size detectedGridSize, const std::vector<Poin
     }
   }
 
-  Mat H = findHomography(Mat(centers), Mat(dstPoints), RANSAC);
-  //Mat H = findHomography( Mat( corners ), Mat( dstPoints ) );
+  Mat H = findHomography(centers, dstPoints, RANSAC);
+  //Mat H = findHomography(corners, dstPoints);
 
   if (H.empty())
   {
@@ -888,15 +882,14 @@ Mat CirclesGridFinder::rectifyGrid(Size detectedGridSize, const std::vector<Poin
   }
 
   Mat dstKeypointsMat;
-  transform(Mat(srcKeypoints), dstKeypointsMat, H);
+  transform(srcKeypoints, dstKeypointsMat, H);
   std::vector<Point2f> dstKeypoints;
   convertPointsFromHomogeneous(dstKeypointsMat, dstKeypoints);
 
   warpedKeypoints.clear();
-  for (size_t i = 0; i < dstKeypoints.size(); i++)
+  for (auto &pt:dstKeypoints)
   {
-    Point2f pt = dstKeypoints[i];
-    warpedKeypoints.push_back(pt);
+    warpedKeypoints.emplace_back(std::move(pt));
   }
 
   return H;
@@ -1176,7 +1169,7 @@ void CirclesGridFinder::findBasis(const std::vector<Point2f> &samples, std::vect
   }
   for (size_t i = 0; i < basis.size(); i++)
   {
-    convexHull(Mat(clusters[i]), hulls[i]);
+    convexHull(clusters[i], hulls[i]);
   }
 
   basisGraphs.resize(basis.size(), Graph(keypoints.size()));
@@ -1191,7 +1184,7 @@ void CirclesGridFinder::findBasis(const std::vector<Point2f> &samples, std::vect
 
       for (size_t k = 0; k < hulls.size(); k++)
       {
-        if (pointPolygonTest(Mat(hulls[k]), vec, false) >= 0)
+        if (pointPolygonTest(hulls[k], vec, false) >= 0)
         {
           basisGraphs[k].addEdge(i, j);
         }
@@ -1422,7 +1415,6 @@ void CirclesGridFinder::drawHoles(const Mat &srcImage, Mat &drawImage) const
       if (i != holes.size() - 1)
         line(drawImage, keypoints[holes[i][j]], keypoints[holes[i + 1][j]], Scalar(255, 0, 0), 2);
 
-      //circle(drawImage, keypoints[holes[i][j]], holeRadius, holeColor, holeThickness);
       circle(drawImage, keypoints[holes[i][j]], holeRadius, holeColor, holeThickness);
     }
   }
@@ -1533,35 +1525,35 @@ void CirclesGridFinder::getCornerSegments(const std::vector<std::vector<size_t> 
 
   //all 8 segments with one end in a corner
   std::vector<Segment> corner;
-  corner.push_back(Segment(keypoints[points[1][0]], keypoints[points[0][0]]));
-  corner.push_back(Segment(keypoints[points[0][0]], keypoints[points[0][1]]));
+  corner.emplace_back(keypoints[points[1][0]], keypoints[points[0][0]]);
+  corner.emplace_back(keypoints[points[0][0]], keypoints[points[0][1]]);
   segments.push_back(corner);
-  cornerIndices.push_back(Point(0, 0));
-  firstSteps.push_back(Point(1, 0));
-  secondSteps.push_back(Point(0, 1));
+  cornerIndices.emplace_back(0, 0);
+  firstSteps.emplace_back(1, 0);
+  secondSteps.emplace_back(0, 1);
   corner.clear();
 
-  corner.push_back(Segment(keypoints[points[0][w - 2]], keypoints[points[0][w - 1]]));
-  corner.push_back(Segment(keypoints[points[0][w - 1]], keypoints[points[1][w - 1]]));
+  corner.emplace_back(keypoints[points[0][w - 2]], keypoints[points[0][w - 1]]);
+  corner.emplace_back(keypoints[points[0][w - 1]], keypoints[points[1][w - 1]]);
   segments.push_back(corner);
-  cornerIndices.push_back(Point(w - 1, 0));
-  firstSteps.push_back(Point(0, 1));
-  secondSteps.push_back(Point(-1, 0));
+  cornerIndices.emplace_back(w - 1, 0);
+  firstSteps.emplace_back(0, 1);
+  secondSteps.emplace_back(-1, 0);
   corner.clear();
 
-  corner.push_back(Segment(keypoints[points[h - 2][w - 1]], keypoints[points[h - 1][w - 1]]));
-  corner.push_back(Segment(keypoints[points[h - 1][w - 1]], keypoints[points[h - 1][w - 2]]));
+  corner.emplace_back(keypoints[points[h - 2][w - 1]], keypoints[points[h - 1][w - 1]]);
+  corner.emplace_back(keypoints[points[h - 1][w - 1]], keypoints[points[h - 1][w - 2]]);
   segments.push_back(corner);
-  cornerIndices.push_back(Point(w - 1, h - 1));
-  firstSteps.push_back(Point(-1, 0));
-  secondSteps.push_back(Point(0, -1));
+  cornerIndices.emplace_back(w - 1, h - 1);
+  firstSteps.emplace_back(-1, 0);
+  secondSteps.emplace_back(0, -1);
   corner.clear();
 
-  corner.push_back(Segment(keypoints[points[h - 1][1]], keypoints[points[h - 1][0]]));
-  corner.push_back(Segment(keypoints[points[h - 1][0]], keypoints[points[h - 2][0]]));
-  cornerIndices.push_back(Point(0, h - 1));
-  firstSteps.push_back(Point(0, -1));
-  secondSteps.push_back(Point(1, 0));
+  corner.emplace_back(keypoints[points[h - 1][1]], keypoints[points[h - 1][0]]);
+  corner.emplace_back(keypoints[points[h - 1][0]], keypoints[points[h - 2][0]]);
+  cornerIndices.emplace_back(0, h - 1);
+  firstSteps.emplace_back(0, -1);
+  secondSteps.emplace_back(1, 0);
   segments.push_back(corner);
   corner.clear();
 
@@ -1621,7 +1613,7 @@ size_t CirclesGridFinder::getFirstCorner(std::vector<Point> &largeCornerIndices,
   int cornerIdx = 0;
   bool waitOutsider = true;
 
-  for(;;)
+  for (size_t i = 0; i < cornersCount * 2; ++i)
   {
     if (waitOutsider)
     {
@@ -1631,11 +1623,11 @@ size_t CirclesGridFinder::getFirstCorner(std::vector<Point> &largeCornerIndices,
     else
     {
       if (isInsider[(cornerIdx + 1) % cornersCount])
-        break;
+        return cornerIdx;
     }
 
     cornerIdx = (cornerIdx + 1) % cornersCount;
   }
 
-  return cornerIdx;
+  CV_Error(Error::StsNoConv, "isInsider array has the same values");
 }

@@ -63,7 +63,7 @@ CollectPolyEdges( Mat& img, const Point2l* v, int npts,
                   int shift, Point offset=Point() );
 
 static void
-FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color );
+FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color, int line_type);
 
 static void
 PolyLine( Mat& img, const Point2l* v, int npts, bool closed,
@@ -138,7 +138,7 @@ bool clipLine( Size2l img_size, Point2l& pt1, Point2l& pt2 )
             }
         }
 
-        assert( (c1 & c2) != 0 || (x1 | y1 | x2 | y2) >= 0 );
+        CV_Assert( (c1 & c2) != 0 || (x1 | y1 | x2 | y2) >= 0 );
     }
 
     return (c1 | c2) == 0;
@@ -156,96 +156,107 @@ bool clipLine( Rect img_rect, Point& pt1, Point& pt2 )
     return inside;
 }
 
-/*
-   Initializes line iterator.
-   Returns number of points on the line or negative number if error.
-*/
-LineIterator::LineIterator(const Mat& img, Point pt1, Point pt2,
-                           int connectivity, bool left_to_right)
+void LineIterator::init( const Mat* img, Rect rect, Point pt1_, Point pt2_, int connectivity, bool leftToRight )
 {
-    count = -1;
-
     CV_Assert( connectivity == 8 || connectivity == 4 );
 
-    if( (unsigned)pt1.x >= (unsigned)(img.cols) ||
-        (unsigned)pt2.x >= (unsigned)(img.cols) ||
-        (unsigned)pt1.y >= (unsigned)(img.rows) ||
-        (unsigned)pt2.y >= (unsigned)(img.rows) )
+    count = -1;
+    p = Point(0, 0);
+    ptr0 = ptr = 0;
+    step = elemSize = 0;
+    ptmode = !img;
+
+    Point pt1 = pt1_ - rect.tl();
+    Point pt2 = pt2_ - rect.tl();
+
+    if( (unsigned)pt1.x >= (unsigned)(rect.width) ||
+        (unsigned)pt2.x >= (unsigned)(rect.width) ||
+        (unsigned)pt1.y >= (unsigned)(rect.height) ||
+        (unsigned)pt2.y >= (unsigned)(rect.height) )
     {
-        if( !clipLine( img.size(), pt1, pt2 ) )
+        if( !clipLine(Size(rect.width, rect.height), pt1, pt2) )
         {
-            ptr = img.data;
-            err = plusDelta = minusDelta = plusStep = minusStep = count = 0;
-            ptr0 = 0;
-            step = 0;
-            elemSize = 0;
+            err = plusDelta = minusDelta = plusStep = minusStep = plusShift = minusShift = count = 0;
             return;
         }
     }
 
-    size_t bt_pix0 = img.elemSize(), bt_pix = bt_pix0;
-    size_t istep = img.step;
+    pt1 += rect.tl();
+    pt2 += rect.tl();
 
+    int delta_x = 1, delta_y = 1;
     int dx = pt2.x - pt1.x;
     int dy = pt2.y - pt1.y;
-    int s = dx < 0 ? -1 : 0;
 
-    if( left_to_right )
+    if( dx < 0 )
     {
-        dx = (dx ^ s) - s;
-        dy = (dy ^ s) - s;
-        pt1.x ^= (pt1.x ^ pt2.x) & s;
-        pt1.y ^= (pt1.y ^ pt2.y) & s;
+        if( leftToRight )
+        {
+            dx = -dx;
+            dy = -dy;
+            pt1 = pt2;
+        }
+        else
+        {
+            dx = -dx;
+            delta_x = -1;
+        }
     }
-    else
+
+    if( dy < 0 )
     {
-        dx = (dx ^ s) - s;
-        bt_pix = (bt_pix ^ s) - s;
+        dy = -dy;
+        delta_y = -1;
     }
 
-    ptr = (uchar*)(img.data + pt1.y * istep + pt1.x * bt_pix0);
+    bool vert = dy > dx;
+    if( vert )
+    {
+        std::swap(dx, dy);
+        std::swap(delta_x, delta_y);
+    }
 
-    s = dy < 0 ? -1 : 0;
-    dy = (dy ^ s) - s;
-    istep = (istep ^ s) - s;
-
-    s = dy > dx ? -1 : 0;
-
-    /* conditional swaps */
-    dx ^= dy & s;
-    dy ^= dx & s;
-    dx ^= dy & s;
-
-    bt_pix ^= istep & s;
-    istep ^= bt_pix & s;
-    bt_pix ^= istep & s;
+    CV_Assert( dx >= 0 && dy >= 0 );
 
     if( connectivity == 8 )
     {
-        assert( dx >= 0 && dy >= 0 );
-
         err = dx - (dy + dy);
         plusDelta = dx + dx;
         minusDelta = -(dy + dy);
-        plusStep = (int)istep;
-        minusStep = (int)bt_pix;
+        minusShift = delta_x;
+        plusShift = 0;
+        minusStep = 0;
+        plusStep = delta_y;
         count = dx + 1;
     }
     else /* connectivity == 4 */
     {
-        assert( dx >= 0 && dy >= 0 );
-
         err = 0;
         plusDelta = (dx + dx) + (dy + dy);
         minusDelta = -(dy + dy);
-        plusStep = (int)(istep - bt_pix);
-        minusStep = (int)bt_pix;
+        minusShift = delta_x;
+        plusShift = -delta_x;
+        minusStep = 0;
+        plusStep = delta_y;
         count = dx + dy + 1;
     }
 
-    this->ptr0 = img.ptr();
-    this->step = (int)img.step;
-    this->elemSize = (int)bt_pix0;
+    if( vert )
+    {
+        std::swap(plusStep, plusShift);
+        std::swap(minusStep, minusShift);
+    }
+
+    p = pt1;
+    if( !ptmode )
+    {
+        ptr0 = img->ptr();
+        step = (int)img->step;
+        elemSize = (int)img->elemSize();
+        ptr = (uchar*)ptr0 + (size_t)p.y*step + (size_t)p.x*elemSize;
+        plusStep = plusStep*step + plusShift*elemSize;
+        minusStep = minusStep*step + minusShift*elemSize;
+    }
 }
 
 static void
@@ -262,19 +273,26 @@ Line( Mat& img, Point pt1, Point pt2,
     int pix_size = (int)img.elemSize();
     const uchar* color = (const uchar*)_color;
 
-    for( i = 0; i < count; i++, ++iterator )
+    if( pix_size == 3 )
     {
-        uchar* ptr = *iterator;
-        if( pix_size == 1 )
-            ptr[0] = color[0];
-        else if( pix_size == 3 )
+        for( i = 0; i < count; i++, ++iterator )
         {
+            uchar* ptr = *iterator;
             ptr[0] = color[0];
             ptr[1] = color[1];
             ptr[2] = color[2];
         }
-        else
-            memcpy( *iterator, color, pix_size );
+    }
+    else
+    {
+        for( i = 0; i < count; i++, ++iterator )
+        {
+            uchar* ptr = *iterator;
+            if( pix_size == 1 )
+                ptr[0] = color[0];
+            else
+                memcpy( *iterator, color, pix_size );
+        }
     }
 }
 
@@ -308,7 +326,7 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
     int nch = img.channels();
     uchar* ptr = img.ptr();
     size_t step = img.step;
-    Size2l size(img.size());
+    Size2l size0(img.size()), size = size0;
 
     if( !((nch == 1 || nch == 3 || nch == 4) && img.depth() == CV_8U) )
     {
@@ -316,15 +334,8 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
         return;
     }
 
-    pt1.x -= XY_ONE*2;
-    pt1.y -= XY_ONE*2;
-    pt2.x -= XY_ONE*2;
-    pt2.y -= XY_ONE*2;
-    ptr += img.step*2 + 2*nch;
-
-    size.width = ((size.width - 5) << XY_SHIFT) + 1;
-    size.height = ((size.height - 5) << XY_SHIFT) + 1;
-
+    size.width <<= XY_SHIFT;
+    size.height <<= XY_SHIFT;
     if( !clipLine( size, pt1, pt2 ))
         return;
 
@@ -347,7 +358,7 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
         pt1.y ^= pt2.y & j;
 
         x_step = XY_ONE;
-        y_step = (dy << XY_SHIFT) / (ax | 1);
+        y_step = (int64)((uint64_t)dy << XY_SHIFT) / (ax | 1);
         pt2.x += XY_ONE;
         ecount = (int)((pt2.x >> XY_SHIFT) - (pt1.x >> XY_SHIFT));
         j = -(pt1.x & (XY_ONE - 1));
@@ -369,7 +380,7 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
         pt2.y ^= pt1.y & i;
         pt1.y ^= pt2.y & i;
 
-        x_step = (dx << XY_SHIFT) / (ay | 1);
+        x_step = (int64)((uint64_t)dx << XY_SHIFT) / (ay | 1);
         y_step = XY_ONE;
         pt2.y += XY_ONE;
         ecount = (int)((pt2.y >> XY_SHIFT) - (pt1.y >> XY_SHIFT));
@@ -403,13 +414,17 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
 
     if( nch == 3 )
     {
-        #define  ICV_PUT_POINT()            \
+        #define  ICV_PUT_POINT(x, y)        \
         {                                   \
+            uchar* tptr = ptr + (x)*3 + (y)*step; \
             _cb = tptr[0];                  \
+            _cb += ((cb - _cb)*a + 127)>> 8;\
             _cb += ((cb - _cb)*a + 127)>> 8;\
             _cg = tptr[1];                  \
             _cg += ((cg - _cg)*a + 127)>> 8;\
+            _cg += ((cg - _cg)*a + 127)>> 8;\
             _cr = tptr[2];                  \
+            _cr += ((cr - _cr)*a + 127)>> 8;\
             _cr += ((cr - _cr)*a + 127)>> 8;\
             tptr[0] = (uchar)_cb;           \
             tptr[1] = (uchar)_cg;           \
@@ -417,156 +432,141 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
         }
         if( ax > ay )
         {
-            ptr += (pt1.x >> XY_SHIFT) * 3;
+            int x = (int)(pt1.x >> XY_SHIFT);
 
-            while( ecount >= 0 )
+            for( ; ecount >= 0; x++, pt1.y += y_step, scount++, ecount-- )
             {
-                uchar *tptr = ptr + ((pt1.y >> XY_SHIFT) - 1) * step;
+                if( (unsigned)x >= (unsigned)size0.width )
+                    continue;
+                int y = (int)((pt1.y >> XY_SHIFT) - 1);
 
                 int ep_corr = ep_table[(((scount >= 2) + 1) & (scount | 2)) * 3 +
                                        (((ecount >= 2) + 1) & (ecount | 2))];
                 int a, dist = (pt1.y >> (XY_SHIFT - 5)) & 31;
 
                 a = (ep_corr * FilterTable[dist + 32] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)y < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y)
 
-                tptr += step;
                 a = (ep_corr * FilterTable[dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)(y+1) < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y+1)
 
-                tptr += step;
                 a = (ep_corr * FilterTable[63 - dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
-
-                pt1.y += y_step;
-                ptr += 3;
-                scount++;
-                ecount--;
+                if( (unsigned)(y+2) < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y+2)
             }
         }
         else
         {
-            ptr += (pt1.y >> XY_SHIFT) * step;
+            int y = (int)(pt1.y >> XY_SHIFT);
 
-            while( ecount >= 0 )
+            for( ; ecount >= 0; y++, pt1.x += x_step, scount++, ecount-- )
             {
-                uchar *tptr = ptr + ((pt1.x >> XY_SHIFT) - 1) * 3;
-
+                if( (unsigned)y >= (unsigned)size0.height )
+                    continue;
+                int x = (int)((pt1.x >> XY_SHIFT) - 1);
                 int ep_corr = ep_table[(((scount >= 2) + 1) & (scount | 2)) * 3 +
                                        (((ecount >= 2) + 1) & (ecount | 2))];
                 int a, dist = (pt1.x >> (XY_SHIFT - 5)) & 31;
 
                 a = (ep_corr * FilterTable[dist + 32] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)x < (unsigned)size0.width )
+                    ICV_PUT_POINT(x, y)
 
-                tptr += 3;
                 a = (ep_corr * FilterTable[dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)(x+1) < (unsigned)size0.width )
+                    ICV_PUT_POINT(x+1, y)
 
-                tptr += 3;
                 a = (ep_corr * FilterTable[63 - dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
-
-                pt1.x += x_step;
-                ptr += step;
-                scount++;
-                ecount--;
+                if( (unsigned)(x+2) < (unsigned)size0.width )
+                    ICV_PUT_POINT(x+2, y)
             }
         }
         #undef ICV_PUT_POINT
     }
     else if(nch == 1)
     {
-        #define  ICV_PUT_POINT()            \
+        #define ICV_PUT_POINT(x, y)         \
         {                                   \
+            uchar* tptr = ptr + (x) + (y) * step; \
             _cb = tptr[0];                  \
+            _cb += ((cb - _cb)*a + 127)>> 8;\
             _cb += ((cb - _cb)*a + 127)>> 8;\
             tptr[0] = (uchar)_cb;           \
         }
 
         if( ax > ay )
         {
-            ptr += (pt1.x >> XY_SHIFT);
+            int x = (int)(pt1.x >> XY_SHIFT);
 
-            while( ecount >= 0 )
+            for( ; ecount >= 0; x++, pt1.y += y_step, scount++, ecount-- )
             {
-                uchar *tptr = ptr + ((pt1.y >> XY_SHIFT) - 1) * step;
+                if( (unsigned)x >= (unsigned)size0.width )
+                    continue;
+                int y = (int)((pt1.y >> XY_SHIFT) - 1);
 
                 int ep_corr = ep_table[(((scount >= 2) + 1) & (scount | 2)) * 3 +
                                        (((ecount >= 2) + 1) & (ecount | 2))];
                 int a, dist = (pt1.y >> (XY_SHIFT - 5)) & 31;
 
                 a = (ep_corr * FilterTable[dist + 32] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)y < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y)
 
-                tptr += step;
                 a = (ep_corr * FilterTable[dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)(y+1) < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y+1)
 
-                tptr += step;
                 a = (ep_corr * FilterTable[63 - dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
-
-                pt1.y += y_step;
-                ptr++;
-                scount++;
-                ecount--;
+                if( (unsigned)(y+2) < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y+2)
             }
         }
         else
         {
-            ptr += (pt1.y >> XY_SHIFT) * step;
+            int y = (int)(pt1.y >> XY_SHIFT);
 
-            while( ecount >= 0 )
+            for( ; ecount >= 0; y++, pt1.x += x_step, scount++, ecount-- )
             {
-                uchar *tptr = ptr + ((pt1.x >> XY_SHIFT) - 1);
-
+                if( (unsigned)y >= (unsigned)size0.height )
+                    continue;
+                int x = (int)((pt1.x >> XY_SHIFT) - 1);
                 int ep_corr = ep_table[(((scount >= 2) + 1) & (scount | 2)) * 3 +
                                        (((ecount >= 2) + 1) & (ecount | 2))];
                 int a, dist = (pt1.x >> (XY_SHIFT - 5)) & 31;
 
                 a = (ep_corr * FilterTable[dist + 32] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)x < (unsigned)size0.width )
+                    ICV_PUT_POINT(x, y)
 
-                tptr++;
                 a = (ep_corr * FilterTable[dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)(x+1) < (unsigned)size0.width )
+                    ICV_PUT_POINT(x+1, y)
 
-                tptr++;
                 a = (ep_corr * FilterTable[63 - dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
-
-                pt1.x += x_step;
-                ptr += step;
-                scount++;
-                ecount--;
+                if( (unsigned)(x+2) < (unsigned)size0.width )
+                    ICV_PUT_POINT(x+2, y)
             }
         }
         #undef ICV_PUT_POINT
     }
     else
     {
-        #define  ICV_PUT_POINT()            \
+        #define  ICV_PUT_POINT(x, y)        \
         {                                   \
+            uchar* tptr = ptr + (x)*4 + (y)*step; \
             _cb = tptr[0];                  \
+            _cb += ((cb - _cb)*a + 127)>> 8;\
             _cb += ((cb - _cb)*a + 127)>> 8;\
             _cg = tptr[1];                  \
             _cg += ((cg - _cg)*a + 127)>> 8;\
+            _cg += ((cg - _cg)*a + 127)>> 8;\
             _cr = tptr[2];                  \
             _cr += ((cr - _cr)*a + 127)>> 8;\
+            _cr += ((cr - _cr)*a + 127)>> 8;\
             _ca = tptr[3];                  \
+            _ca += ((ca - _ca)*a + 127)>> 8;\
             _ca += ((ca - _ca)*a + 127)>> 8;\
             tptr[0] = (uchar)_cb;           \
             tptr[1] = (uchar)_cg;           \
@@ -575,66 +575,55 @@ LineAA( Mat& img, Point2l pt1, Point2l pt2, const void* color )
         }
         if( ax > ay )
         {
-            ptr += (pt1.x >> XY_SHIFT) * 4;
+            int x = (int)(pt1.x >> XY_SHIFT);
 
-            while( ecount >= 0 )
+            for( ; ecount >= 0; x++, pt1.y += y_step, scount++, ecount-- )
             {
-                uchar *tptr = ptr + ((pt1.y >> XY_SHIFT) - 1) * step;
+                if( (unsigned)x >= (unsigned)size0.width )
+                    continue;
+                int y = (int)((pt1.y >> XY_SHIFT) - 1);
 
                 int ep_corr = ep_table[(((scount >= 2) + 1) & (scount | 2)) * 3 +
                                        (((ecount >= 2) + 1) & (ecount | 2))];
                 int a, dist = (pt1.y >> (XY_SHIFT - 5)) & 31;
 
                 a = (ep_corr * FilterTable[dist + 32] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)y < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y)
 
-                tptr += step;
                 a = (ep_corr * FilterTable[dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)(y+1) < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y+1)
 
-                tptr += step;
                 a = (ep_corr * FilterTable[63 - dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
-
-                pt1.y += y_step;
-                ptr += 4;
-                scount++;
-                ecount--;
+                if( (unsigned)(y+2) < (unsigned)size0.height )
+                    ICV_PUT_POINT(x, y+2)
             }
         }
         else
         {
-            ptr += (pt1.y >> XY_SHIFT) * step;
+            int y = (int)(pt1.y >> XY_SHIFT);
 
-            while( ecount >= 0 )
+            for( ; ecount >= 0; y++, pt1.x += x_step, scount++, ecount-- )
             {
-                uchar *tptr = ptr + ((pt1.x >> XY_SHIFT) - 1) * 4;
-
+                if( (unsigned)y >= (unsigned)size0.height )
+                    continue;
+                int x = (int)((pt1.x >> XY_SHIFT) - 1);
                 int ep_corr = ep_table[(((scount >= 2) + 1) & (scount | 2)) * 3 +
                                        (((ecount >= 2) + 1) & (ecount | 2))];
                 int a, dist = (pt1.x >> (XY_SHIFT - 5)) & 31;
 
                 a = (ep_corr * FilterTable[dist + 32] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)x < (unsigned)size0.width )
+                    ICV_PUT_POINT(x, y)
 
-                tptr += 4;
                 a = (ep_corr * FilterTable[dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
+                if( (unsigned)(x+1) < (unsigned)size0.width )
+                    ICV_PUT_POINT(x+1, y)
 
-                tptr += 4;
                 a = (ep_corr * FilterTable[63 - dist] >> 8) & 0xff;
-                ICV_PUT_POINT();
-                ICV_PUT_POINT();
-
-                pt1.x += x_step;
-                ptr += step;
-                scount++;
-                ecount--;
+                if( (unsigned)(x+2) < (unsigned)size0.width )
+                    ICV_PUT_POINT(x+2, y)
             }
         }
         #undef ICV_PUT_POINT
@@ -659,7 +648,7 @@ Line2( Mat& img, Point2l pt1, Point2l pt2, const void* color)
     size_t step = img.step;
     Size size = img.size();
 
-    //assert( img && (nch == 1 || nch == 3) && img.depth() == CV_8U );
+    //CV_Assert( img && (nch == 1 || nch == 3) && img.depth() == CV_8U );
 
     Size2l sizeScaled(((int64)size.width) << XY_SHIFT, ((int64)size.height) << XY_SHIFT);
     if( !clipLine( sizeScaled, pt1, pt2 ))
@@ -684,7 +673,7 @@ Line2( Mat& img, Point2l pt1, Point2l pt2, const void* color)
         pt1.y ^= pt2.y & j;
 
         x_step = XY_ONE;
-        y_step = (dy << XY_SHIFT) / (ax | 1);
+        y_step = dy * (1 << XY_SHIFT) / (ax | 1);
         ecount = (int)((pt2.x - pt1.x) >> XY_SHIFT);
     }
     else
@@ -697,7 +686,7 @@ Line2( Mat& img, Point2l pt1, Point2l pt2, const void* color)
         pt2.y ^= pt1.y & i;
         pt1.y ^= pt2.y & i;
 
-        x_step = (dx << XY_SHIFT) / (ay | 1);
+        x_step = dx * (1 << XY_SHIFT) / (ay | 1);
         y_step = XY_ONE;
         ecount = (int)((pt2.y - pt1.y) >> XY_SHIFT);
     }
@@ -950,6 +939,7 @@ void ellipse2Poly( Point center, Size axes, int angle,
     }
 
     // If there are no points, it's a zero-size polygon
+    CV_Assert( !pts.empty() );
     if (pts.size() == 1) {
         pts.assign(2, center);
     }
@@ -960,6 +950,7 @@ void ellipse2Poly( Point2d center, Size2d axes, int angle,
                    int delta, std::vector<Point2d>& pts )
 {
     CV_INSTRUMENT_REGION();
+    CV_Assert(0 < delta && delta <= 180);
 
     float alpha, beta;
     int i;
@@ -1011,6 +1002,7 @@ void ellipse2Poly( Point2d center, Size2d axes, int angle,
     }
 
     // If there are no points, it's a zero-size polygon
+    CV_Assert( !pts.empty() );
     if( pts.size() == 1) {
         pts.assign(2,center);
     }
@@ -1031,7 +1023,6 @@ EllipseEx( Mat& img, Point2l center, Size2l axes,
 
     std::vector<Point2l> v;
     Point2l prevPt(0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF);
-    v.resize(0);
     for (unsigned int i = 0; i < _v.size(); ++i)
     {
         Point2l pt;
@@ -1046,7 +1037,7 @@ EllipseEx( Mat& img, Point2l center, Size2l axes,
     }
 
     // If there are no points, it's a zero-size polygon
-    if (v.size() == 1) {
+    if (v.size() <= 1) {
         v.assign(2, center);
     }
 
@@ -1059,7 +1050,7 @@ EllipseEx( Mat& img, Point2l center, Size2l axes,
         v.push_back(center);
         std::vector<PolyEdge> edges;
         CollectPolyEdges( img,  &v[0], (int)v.size(), edges, color, line_type, XY_SHIFT );
-        FillEdgeCollection( img, edges, color );
+        FillEdgeCollection( img, edges, color, line_type );
     }
 }
 
@@ -1068,7 +1059,7 @@ EllipseEx( Mat& img, Point2l center, Size2l axes,
 *                                Polygons filling                                        *
 \****************************************************************************************/
 
-static inline void ICV_HLINE_X(uchar* ptr, int xl, int xr, const uchar* color, int pix_size)
+static inline void ICV_HLINE_X(uchar* ptr, int64_t xl, int64_t xr, const uchar* color, int pix_size)
 {
     uchar* hline_min_ptr = (uchar*)(ptr) + (xl)*(pix_size);
     uchar* hline_end_ptr = (uchar*)(ptr) + (xr+1)*(pix_size);
@@ -1093,7 +1084,7 @@ static inline void ICV_HLINE_X(uchar* ptr, int xl, int xr, const uchar* color, i
 }
 //end ICV_HLINE_X()
 
-static inline void ICV_HLINE(uchar* ptr, int xl, int xr, const void* color, int pix_size)
+static inline void ICV_HLINE(uchar* ptr, int64_t xl, int64_t xr, const void* color, int pix_size)
 {
   ICV_HLINE_X(ptr, xl, xr, reinterpret_cast<const uchar*>(color), pix_size);
 }
@@ -1121,7 +1112,7 @@ FillConvexPoly( Mat& img, const Point2l* v, int npts, const void* color, int lin
     Point2l p0;
     int delta1, delta2;
 
-    if( line_type < CV_AA )
+    if( line_type < cv::LINE_AA )
         delta1 = delta2 = XY_ONE >> 1;
     else
         delta1 = XY_ONE - 1, delta2 = 0;
@@ -1130,7 +1121,7 @@ FillConvexPoly( Mat& img, const Point2l* v, int npts, const void* color, int lin
     p0.x <<= XY_SHIFT - shift;
     p0.y <<= XY_SHIFT - shift;
 
-    assert( 0 <= shift && shift <= XY_SHIFT );
+    CV_Assert( 0 <= shift && shift <= XY_SHIFT );
     xmin = xmax = v[0].x;
     ymin = ymax = v[0].y;
 
@@ -1187,11 +1178,11 @@ FillConvexPoly( Mat& img, const Point2l* v, int npts, const void* color, int lin
     edge[0].x = edge[1].x = -XY_ONE;
     edge[0].dx = edge[1].dx = 0;
 
-    ptr += img.step*y;
+    ptr += (int64_t)img.step*y;
 
     do
     {
-        if( line_type < CV_AA || y < (int)ymax || y == (int)ymin )
+        if( line_type < cv::LINE_AA || y < (int)ymax || y == (int)ymin )
         {
             for( i = 0; i < 2; i++ )
             {
@@ -1216,7 +1207,7 @@ FillConvexPoly( Mat& img, const Point2l* v, int npts, const void* color, int lin
                             }
 
                             edge[i].ye = ty;
-                            edge[i].dx = ((xe - xs)*2 + (ty - y)) / (2 * (ty - y));
+                            edge[i].dx = ((xe - xs)*2 + ((int64_t)ty - y)) / (2 * ((int64_t)ty - y));
                             edge[i].x = xs;
                             edge[i].idx = idx;
                             break;
@@ -1287,37 +1278,60 @@ CollectPolyEdges( Mat& img, const Point2l* v, int count, std::vector<PolyEdge>& 
         pt1.x = (pt1.x + offset.x) << (XY_SHIFT - shift);
         pt1.y = (pt1.y + delta) >> shift;
 
-        if( line_type < CV_AA )
+        Point2l pt0c(pt0), pt1c(pt1);
+
+        if (line_type < cv::LINE_AA)
         {
             t0.y = pt0.y; t1.y = pt1.y;
             t0.x = (pt0.x + (XY_ONE >> 1)) >> XY_SHIFT;
             t1.x = (pt1.x + (XY_ONE >> 1)) >> XY_SHIFT;
-            Line( img, t0, t1, color, line_type );
+            Line(img, t0, t1, color, line_type);
+
+            // use clipped endpoints to create a more accurate PolyEdge
+            if ((unsigned)t0.x >= (unsigned)(img.cols) ||
+                (unsigned)t1.x >= (unsigned)(img.cols) ||
+                (unsigned)t0.y >= (unsigned)(img.rows) ||
+                (unsigned)t1.y >= (unsigned)(img.rows))
+            {
+                clipLine(img.size(), t0, t1);
+
+                if (t0.y != t1.y)
+                {
+                    pt0c.y = t0.y; pt1c.y = t1.y;
+                    pt0c.x = (int64)(t0.x) << XY_SHIFT;
+                    pt1c.x = (int64)(t1.x) << XY_SHIFT;
+                }
+            }
+            else
+            {
+                pt0c.x += XY_ONE >> 1;
+                pt1c.x += XY_ONE >> 1;
+            }
         }
         else
         {
             t0.x = pt0.x; t1.x = pt1.x;
             t0.y = pt0.y << XY_SHIFT;
             t1.y = pt1.y << XY_SHIFT;
-            LineAA( img, t0, t1, color );
+            LineAA(img, t0, t1, color);
         }
 
-        if( pt0.y == pt1.y )
+        if (pt0.y == pt1.y)
             continue;
 
-        if( pt0.y < pt1.y )
+        edge.dx = (pt1c.x - pt0c.x) / (pt1c.y - pt0c.y);
+        if (pt0.y < pt1.y)
         {
             edge.y0 = (int)(pt0.y);
             edge.y1 = (int)(pt1.y);
-            edge.x = pt0.x;
+            edge.x = pt0c.x + (pt0.y - pt0c.y) * edge.dx; // correct starting point for clipped lines
         }
         else
         {
             edge.y0 = (int)(pt1.y);
             edge.y1 = (int)(pt0.y);
-            edge.x = pt1.x;
+            edge.x = pt1c.x + (pt1.y - pt1c.y) * edge.dx; // correct starting point for clipped lines
         }
-        edge.dx = (pt1.x - pt0.x) / (pt1.y - pt0.y);
         edges.push_back(edge);
     }
 }
@@ -1334,7 +1348,7 @@ struct CmpEdges
 /**************** helper macros and functions for sequence/contour processing ***********/
 
 static void
-FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
+FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color, int line_type)
 {
     PolyEdge tmp;
     int i, y, total = (int)edges.size();
@@ -1343,6 +1357,12 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
     int y_max = INT_MIN, y_min = INT_MAX;
     int64 x_max = 0xFFFFFFFFFFFFFFFF, x_min = 0x7FFFFFFFFFFFFFFF;
     int pix_size = (int)img.elemSize();
+    int delta;
+
+    if (line_type < CV_AA)
+        delta = 0;
+    else
+        delta = XY_ONE - 1;
 
     if( total < 2 )
         return;
@@ -1350,7 +1370,7 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
     for( i = 0; i < total; i++ )
     {
         PolyEdge& e1 = edges[i];
-        assert( e1.y0 < e1.y1 );
+        CV_Assert( e1.y0 < e1.y1 );
         // Determine x-coordinate of the end of the edge.
         // (This is not necessary x-coordinate of any vertex in the array.)
         int64 x1 = e1.x + (e1.y1 - e1.y0) * e1.dx;
@@ -1379,7 +1399,6 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
     for( y = e->y0; y < y_max; y++ )
     {
         PolyEdge *last, *prelast, *keep_prelast;
-        int sort_flag = 0;
         int draw = 0;
         int clipline = y < 0;
 
@@ -1422,12 +1441,12 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
 
                     if (keep_prelast->x > prelast->x)
                     {
-                        x1 = (int)((prelast->x + XY_ONE - 1) >> XY_SHIFT);
+                        x1 = (int)((prelast->x + delta) >> XY_SHIFT);
                         x2 = (int)(keep_prelast->x >> XY_SHIFT);
                     }
                     else
                     {
-                        x1 = (int)((keep_prelast->x + XY_ONE - 1) >> XY_SHIFT);
+                        x1 = (int)((keep_prelast->x + delta) >> XY_SHIFT);
                         x2 = (int)(prelast->x >> XY_SHIFT);
                     }
 
@@ -1454,6 +1473,7 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
         {
             prelast = &tmp;
             last = tmp.next;
+            PolyEdge *last_exchange = 0;
 
             while( last != keep_prelast && last->next != 0 )
             {
@@ -1466,7 +1486,7 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
                     last->next = te->next;
                     te->next = last;
                     prelast = te;
-                    sort_flag = 1;
+                    last_exchange = prelast;
                 }
                 else
                 {
@@ -1474,9 +1494,10 @@ FillEdgeCollection( Mat& img, std::vector<PolyEdge>& edges, const void* color )
                     last = te;
                 }
             }
-            keep_prelast = prelast;
-        }
-        while( sort_flag && keep_prelast != tmp.next && keep_prelast != &tmp );
+            if (last_exchange == NULL)
+                break;
+            keep_prelast = last_exchange;
+        } while( keep_prelast != tmp.next && keep_prelast != &tmp );
     }
 }
 
@@ -1489,7 +1510,7 @@ Circle( Mat& img, Point center, int radius, const void* color, int fill )
     size_t step = img.step;
     int pix_size = (int)img.elemSize();
     uchar* ptr = img.ptr();
-    int err = 0, dx = radius, dy = 0, plus = 1, minus = (radius << 1) - 1;
+    int64_t err = 0, dx = radius, dy = 0, plus = 1, minus = (radius << 1) - 1;
     int inside = center.x >= radius && center.x < size.width - radius &&
         center.y >= radius && center.y < size.height - radius;
 
@@ -1499,8 +1520,8 @@ Circle( Mat& img, Point center, int radius, const void* color, int fill )
     while( dx >= dy )
     {
         int mask;
-        int y11 = center.y - dy, y12 = center.y + dy, y21 = center.y - dx, y22 = center.y + dx;
-        int x11 = center.x - dx, x12 = center.x + dx, x21 = center.x - dy, x22 = center.x + dy;
+        int64_t y11 = center.y - dy, y12 = center.y + dy, y21 = center.y - dx, y22 = center.y + dx;
+        int64_t x11 = center.x - dx, x12 = center.x + dx, x21 = center.x - dy, x22 = center.x + dy;
 
         if( inside )
         {
@@ -1536,15 +1557,15 @@ Circle( Mat& img, Point center, int radius, const void* color, int fill )
                 ICV_HLINE( tptr1, x21, x22, color, pix_size );
             }
         }
-        else if( x11 < size.width && x12 >= 0 && y21 < size.height && y22 >= 0 )
+        else if( x11 < size.width && x12 >= 0 && y21 < size.height && y22 >= 0)
         {
             if( fill )
             {
-                x11 = std::max( x11, 0 );
+                x11 = std::max( x11, (int64_t)0 );
                 x12 = MIN( x12, size.width - 1 );
             }
 
-            if( (unsigned)y11 < (unsigned)size.height )
+            if( y11 >= 0 && y11 < size.height )
             {
                 uchar *tptr = ptr + y11 * step;
 
@@ -1559,7 +1580,7 @@ Circle( Mat& img, Point center, int radius, const void* color, int fill )
                     ICV_HLINE( tptr, x11, x12, color, pix_size );
             }
 
-            if( (unsigned)y12 < (unsigned)size.height )
+            if( y12 >= 0 && y12 < size.height )
             {
                 uchar *tptr = ptr + y12 * step;
 
@@ -1578,11 +1599,11 @@ Circle( Mat& img, Point center, int radius, const void* color, int fill )
             {
                 if( fill )
                 {
-                    x21 = std::max( x21, 0 );
+                    x21 = std::max( x21, (int64_t)0 );
                     x22 = MIN( x22, size.width - 1 );
                 }
 
-                if( (unsigned)y21 < (unsigned)size.height )
+                if( y21 >= 0 && y21 < size.height )
                 {
                     uchar *tptr = ptr + y21 * step;
 
@@ -1597,7 +1618,7 @@ Circle( Mat& img, Point center, int radius, const void* color, int fill )
                         ICV_HLINE( tptr, x21, x22, color, pix_size );
                 }
 
-                if( (unsigned)y22 < (unsigned)size.height )
+                if( y22 >= 0 && y22 < size.height )
                 {
                     uchar *tptr = ptr + y22 * step;
 
@@ -1641,7 +1662,7 @@ ThickLine( Mat& img, Point2l p0, Point2l p1, const void* color,
 
     if( thickness <= 1 )
     {
-        if( line_type < CV_AA )
+        if( line_type < cv::LINE_AA )
         {
             if( line_type == 1 || line_type == 4 || shift == 0 )
             {
@@ -1687,7 +1708,7 @@ ThickLine( Mat& img, Point2l p0, Point2l p1, const void* color,
         {
             if( flags & (i+1) )
             {
-                if( line_type < CV_AA )
+                if( line_type < cv::LINE_AA )
                 {
                     Point center;
                     center.x = (int)((p0.x + (XY_ONE>>1)) >> XY_SHIFT);
@@ -1733,7 +1754,7 @@ PolyLine( Mat& img, const Point2l* v, int count, bool is_closed,
 /* ADDING A SET OF PREDEFINED MARKERS WHICH COULD BE USED TO HIGHLIGHT POSITIONS IN AN IMAGE */
 /* ----------------------------------------------------------------------------------------- */
 
-void drawMarker(Mat& img, Point position, const Scalar& color, int markerType, int markerSize, int thickness, int line_type)
+void drawMarker(InputOutputArray img, Point position, const Scalar& color, int markerType, int markerSize, int thickness, int line_type)
 {
     switch(markerType)
     {
@@ -1805,7 +1826,7 @@ void line( InputOutputArray _img, Point pt1, Point pt2, const Scalar& color,
 
     Mat img = _img.getMat();
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     CV_Assert( 0 < thickness && thickness <= MAX_THICKNESS );
@@ -1844,7 +1865,7 @@ void rectangle( InputOutputArray _img, Point pt1, Point pt2,
 
     Mat img = _img.getMat();
 
-    if( lineType == CV_AA && img.depth() != CV_8U )
+    if( lineType == cv::LINE_AA && img.depth() != CV_8U )
         lineType = 8;
 
     CV_Assert( thickness <= MAX_THICKNESS );
@@ -1869,13 +1890,18 @@ void rectangle( InputOutputArray _img, Point pt1, Point pt2,
 }
 
 
-void rectangle( Mat& img, Rect rec,
+void rectangle( InputOutputArray img, Rect rec,
                 const Scalar& color, int thickness,
                 int lineType, int shift )
 {
     CV_INSTRUMENT_REGION();
 
     CV_Assert( 0 <= shift && shift <= XY_SHIFT );
+
+    // Crop the rectangle to right around the mat.
+    rec &= Rect(-(1 << shift), -(1 << shift), ((img.cols() + 2) << shift),
+                ((img.rows() + 2) << shift));
+
     if( !rec.empty() )
         rectangle( img, rec.tl(), rec.br() - Point(1<<shift,1<<shift),
                    color, thickness, lineType, shift );
@@ -1889,7 +1915,7 @@ void circle( InputOutputArray _img, Point center, int radius,
 
     Mat img = _img.getMat();
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     CV_Assert( radius >= 0 && thickness <= MAX_THICKNESS &&
@@ -1921,7 +1947,7 @@ void ellipse( InputOutputArray _img, Point center, Size axes,
 
     Mat img = _img.getMat();
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     CV_Assert( axes.width >= 0 && axes.height >= 0 &&
@@ -1951,7 +1977,7 @@ void ellipse(InputOutputArray _img, const RotatedRect& box, const Scalar& color,
 
     Mat img = _img.getMat();
 
-    if( lineType == CV_AA && img.depth() != CV_8U )
+    if( lineType == cv::LINE_AA && img.depth() != CV_8U )
         lineType = 8;
 
     CV_Assert( box.size.width >= 0 && box.size.height >= 0 &&
@@ -1972,15 +1998,17 @@ void ellipse(InputOutputArray _img, const RotatedRect& box, const Scalar& color,
     EllipseEx( img, center, axes, _angle, 0, 360, buf, thickness, lineType );
 }
 
-void fillConvexPoly( Mat& img, const Point* pts, int npts,
+void fillConvexPoly( InputOutputArray _img, const Point* pts, int npts,
                      const Scalar& color, int line_type, int shift )
 {
     CV_INSTRUMENT_REGION();
 
+    Mat img = _img.getMat();
+
     if( !pts || npts <= 0 )
         return;
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     double buf[4];
@@ -1990,14 +2018,15 @@ void fillConvexPoly( Mat& img, const Point* pts, int npts,
     FillConvexPoly( img, _pts.data(), npts, buf, line_type, shift );
 }
 
-
-void fillPoly( Mat& img, const Point** pts, const int* npts, int ncontours,
+void fillPoly( InputOutputArray _img, const Point** pts, const int* npts, int ncontours,
                const Scalar& color, int line_type,
                int shift, Point offset )
 {
     CV_INSTRUMENT_REGION();
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    Mat img = _img.getMat();
+
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     CV_Assert( pts && npts && ncontours >= 0 && 0 <= shift && shift <= XY_SHIFT );
@@ -2018,16 +2047,17 @@ void fillPoly( Mat& img, const Point** pts, const int* npts, int ncontours,
         CollectPolyEdges(img, _pts.data(), npts[i], edges, buf, line_type, shift, offset);
     }
 
-    FillEdgeCollection(img, edges, buf);
+    FillEdgeCollection(img, edges, buf, line_type);
 }
 
-
-void polylines( Mat& img, const Point* const* pts, const int* npts, int ncontours, bool isClosed,
+void polylines( InputOutputArray _img, const Point* const* pts, const int* npts, int ncontours, bool isClosed,
                 const Scalar& color, int thickness, int line_type, int shift )
 {
     CV_INSTRUMENT_REGION();
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    Mat img = _img.getMat();
+
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     CV_Assert( pts && npts && ncontours >= 0 &&
@@ -2371,25 +2401,24 @@ double getFontScaleFromHeight(const int fontFace, const int pixelHeight, const i
 
 }
 
-
-void cv::fillConvexPoly(InputOutputArray _img, InputArray _points,
+void cv::fillConvexPoly(InputOutputArray img, InputArray _points,
                         const Scalar& color, int lineType, int shift)
 {
     CV_INSTRUMENT_REGION();
 
-    Mat img = _img.getMat(), points = _points.getMat();
+    Mat points = _points.getMat();
     CV_Assert(points.checkVector(2, CV_32S) >= 0);
     fillConvexPoly(img, points.ptr<Point>(), points.rows*points.cols*points.channels()/2, color, lineType, shift);
 }
 
-
-void cv::fillPoly(InputOutputArray _img, InputArrayOfArrays pts,
+void cv::fillPoly(InputOutputArray img, InputArrayOfArrays pts,
                   const Scalar& color, int lineType, int shift, Point offset)
 {
     CV_INSTRUMENT_REGION();
 
-    Mat img = _img.getMat();
-    int i, ncontours = (int)pts.total();
+    bool manyContours = pts.kind() == _InputArray::STD_VECTOR_VECTOR ||
+                        pts.kind() == _InputArray::STD_VECTOR_MAT;
+    int i, ncontours = manyContours ? (int)pts.total() : 1;
     if( ncontours == 0 )
         return;
     AutoBuffer<Point*> _ptsptr(ncontours);
@@ -2399,7 +2428,7 @@ void cv::fillPoly(InputOutputArray _img, InputArrayOfArrays pts,
 
     for( i = 0; i < ncontours; i++ )
     {
-        Mat p = pts.getMat(i);
+        Mat p = pts.getMat(manyContours ? i : -1);
         CV_Assert(p.checkVector(2, CV_32S) >= 0);
         ptsptr[i] = p.ptr<Point>();
         npts[i] = p.rows*p.cols*p.channels()/2;
@@ -2407,14 +2436,12 @@ void cv::fillPoly(InputOutputArray _img, InputArrayOfArrays pts,
     fillPoly(img, (const Point**)ptsptr, npts, (int)ncontours, color, lineType, shift, offset);
 }
 
-
-void cv::polylines(InputOutputArray _img, InputArrayOfArrays pts,
+void cv::polylines(InputOutputArray img, InputArrayOfArrays pts,
                    bool isClosed, const Scalar& color,
-                   int thickness, int lineType, int shift )
+                   int thickness, int lineType, int shift)
 {
     CV_INSTRUMENT_REGION();
 
-    Mat img = _img.getMat();
     bool manyContours = pts.kind() == _InputArray::STD_VECTOR_VECTOR ||
                         pts.kind() == _InputArray::STD_VECTOR_MAT;
     int i, ncontours = manyContours ? (int)pts.total() : 1;
@@ -2557,9 +2584,6 @@ void cv::drawContours( InputOutputArray _image, InputArrayOfArrays _contours,
 static const int CodeDeltas[8][2] =
 { {1, 0}, {1, -1}, {0, -1}, {-1, -1}, {-1, 0}, {-1, 1}, {0, 1}, {1, 1} };
 
-#define CV_ADJUST_EDGE_COUNT( count, seq )  \
-    ((count) -= ((count) == (seq)->total && !CV_IS_SEQ_CLOSED(seq)))
-
 CV_IMPL void
 cvDrawContours( void* _img, CvSeq* contour,
                 CvScalar _externalColor, CvScalar _holeColor,
@@ -2575,7 +2599,7 @@ cvDrawContours( void* _img, CvSeq* contour,
     cv::Point offset = _offset;
     double ext_buf[4], hole_buf[4];
 
-    if( line_type == CV_AA && img.depth() != CV_8U )
+    if( line_type == cv::LINE_AA && img.depth() != CV_8U )
         line_type = 8;
 
     if( !contour )
@@ -2622,7 +2646,7 @@ cvDrawContours( void* _img, CvSeq* contour,
                 char code;
                 CV_READ_SEQ_ELEM( code, reader );
 
-                assert( (code & ~7) == 0 );
+                CV_Assert( (code & ~7) == 0 );
 
                 if( code != prev_code )
                 {
@@ -2675,7 +2699,7 @@ cvDrawContours( void* _img, CvSeq* contour,
     }
 
     if( thickness < 0 )
-        cv::FillEdgeCollection( img, edges, ext_buf );
+        cv::FillEdgeCollection( img, edges, ext_buf, line_type);
 
     if( h_next && contour0 )
         contour0->h_next = h_next;

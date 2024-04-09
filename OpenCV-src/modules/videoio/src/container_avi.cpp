@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "opencv2/videoio/container_avi.private.hpp"
+#include <opencv2/core/utils/logger.hpp>
 #include <fstream>
 #include <limits>
 #include <typeinfo>
@@ -22,7 +23,7 @@ inline D safe_int_cast(S val, const char * msg = 0)
     if (!in_range_r || !in_range_l)
     {
         if (!msg)
-            CV_Error_(Error::StsOutOfRange, ("Can not convert integer values (%s -> %s), value 0x%llx is out of range", typeid(S).name(), typeid(D).name(), val));
+            CV_Error_(Error::StsOutOfRange, ("Can not convert integer values (%s -> %s), value 0x%jx is out of range", typeid(S).name(), typeid(D).name(), (uintmax_t)val));
         else
             CV_Error(Error::StsOutOfRange, msg);
     }
@@ -124,6 +125,7 @@ struct RiffList
     uint32_t m_size;
     uint32_t m_list_type_cc;
 };
+#pragma pack(pop)
 
 class VideoInputStream
 {
@@ -149,7 +151,6 @@ private:
     String  m_fname;
 };
 
-#pragma pack(pop)
 
 inline VideoInputStream& operator >> (VideoInputStream& is, AviMainHeader& avih)
 {
@@ -645,6 +646,11 @@ bool BitStream::open(const String& filename)
 {
     close();
     output.open(filename.c_str(), std::ios_base::binary);
+    if (!output.is_open())
+    {
+        CV_LOG_DEBUG(NULL, cv::format("Failed to open stream for writing to  \"%s\"", filename.c_str()));
+        return false;
+    }
     m_current = m_start;
     m_pos = 0;
     return true;
@@ -668,7 +674,7 @@ void BitStream::writeBlock()
 }
 
 size_t BitStream::getPos() const {
-    return safe_int_cast<size_t>(m_current - m_start, "Failed to determine AVI bufer position: value is out of range") + m_pos;
+    return safe_int_cast<size_t>(m_current - m_start, "Failed to determine AVI buffer position: value is out of range") + m_pos;
 }
 
 void BitStream::putByte(int val)
