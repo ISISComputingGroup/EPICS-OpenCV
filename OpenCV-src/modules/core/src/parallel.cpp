@@ -45,6 +45,9 @@
 #include <opencv2/core/utils/configuration.private.hpp>
 #include <opencv2/core/utils/trace.private.hpp>
 
+#include "opencv2/core/parallel/parallel_backend.hpp"
+#include "parallel/parallel.hpp"
+
 #if defined _WIN32 || defined WINCE
     #include <windows.h>
     #undef small
@@ -53,16 +56,24 @@
     #undef abs
 #endif
 
-#if defined __linux__ || defined __APPLE__ || defined __GLIBC__ \
-    || defined __HAIKU__
+#if defined __unix__ || defined __APPLE__ || defined __GLIBC__ \
+    || defined __HAIKU__ || defined __EMSCRIPTEN__ \
+    || defined __FreeBSD__ || defined __NetBSD__ || defined __OpenBSD__
     #include <unistd.h>
     #include <stdio.h>
     #include <sys/types.h>
+    #include <fstream>
     #if defined __ANDROID__
         #include <sys/sysconf.h>
+        #include <sys/syscall.h>
+        #include <sched.h>
     #elif defined __APPLE__
         #include <sys/sysctl.h>
     #endif
+#endif
+
+#ifndef OPENCV_DISABLE_THREAD_SUPPORT
+    #include <thread>
 #endif
 
 #ifdef _OPENMP
@@ -78,27 +89,36 @@
 #endif
 
 /* IMPORTANT: always use the same order of defines
-   1. HAVE_TBB         - 3rdparty library, should be explicitly enabled
-   2. HAVE_CSTRIPES    - 3rdparty library, should be explicitly enabled
-   3. HAVE_OPENMP      - integrated to compiler, should be explicitly enabled
-   4. HAVE_GCD         - system wide, used automatically        (APPLE only)
-   5. WINRT            - system wide, used automatically        (Windows RT only)
-   6. HAVE_CONCURRENCY - part of runtime, used automatically    (Windows only - MSVS 10, MSVS 11)
-   7. HAVE_PTHREADS_PF - pthreads if available
+   - HAVE_TBB         - 3rdparty library, should be explicitly enabled
+   - HAVE_HPX         - 3rdparty library, should be explicitly enabled
+   - HAVE_OPENMP      - integrated to compiler, should be explicitly enabled
+   - HAVE_GCD         - system wide, used automatically        (APPLE only)
+   - WINRT            - system wide, used automatically        (Windows RT only)
+   - HAVE_CONCURRENCY - part of runtime, used automatically    (Windows only - MSVS 10, MSVS 11)
+   - HAVE_PTHREADS_PF - pthreads if available
 */
 
 #if defined HAVE_TBB
+    #ifndef TBB_SUPPRESS_DEPRECATED_MESSAGES  // supress warning
+    #define TBB_SUPPRESS_DEPRECATED_MESSAGES 1
+    #endif
     #include "tbb/tbb.h"
     #include "tbb/task.h"
-    #include "tbb/tbb_stddef.h"
     #if TBB_INTERFACE_VERSION >= 8000
         #include "tbb/task_arena.h"
     #endif
     #undef min
     #undef max
-#elif defined HAVE_CSTRIPES
-    #include "C=.h"
-    #undef shared
+#elif defined HAVE_HPX
+    #include <hpx/parallel/algorithms/for_loop.hpp>
+    #include <hpx/parallel/execution.hpp>
+    //
+    #include <hpx/hpx_start.hpp>
+    #include <hpx/hpx_suspend.hpp>
+    #include <hpx/include/apply.hpp>
+    #include <hpx/util/yield_while.hpp>
+    #include <hpx/include/threadmanager.hpp>
+
 #elif defined HAVE_OPENMP
     #include <omp.h>
 #elif defined HAVE_GCD
@@ -108,13 +128,15 @@
     #include <ppltasks.h>
 #elif defined HAVE_CONCURRENCY
     #include <ppl.h>
+#elif defined HAVE_PTHREADS_PF
+    #include <pthread.h>
 #endif
 
 
 #if defined HAVE_TBB
 #  define CV_PARALLEL_FRAMEWORK "tbb"
-#elif defined HAVE_CSTRIPES
-#  define CV_PARALLEL_FRAMEWORK "cstripes"
+#elif defined HAVE_HPX
+#  define CV_PARALLEL_FRAMEWORK "hpx"
 #elif defined HAVE_OPENMP
 #  define CV_PARALLEL_FRAMEWORK "openmp"
 #elif defined HAVE_GCD
@@ -127,40 +149,25 @@
 #  define CV_PARALLEL_FRAMEWORK "pthreads"
 #endif
 
+#include <atomic>
+
 #include "parallel_impl.hpp"
 
+#include "opencv2/core/detail/exception_ptr.hpp"  // CV__EXCEPTION_PTR = 1 if std::exception_ptr is available
 
-#ifndef CV__EXCEPTION_PTR
-#  if defined(__ANDROID__) && defined(ATOMIC_INT_LOCK_FREE) && ATOMIC_INT_LOCK_FREE < 2
-#    define CV__EXCEPTION_PTR 0  // Not supported, details: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=58938
-#  elif defined(CV_CXX11)
-#    define CV__EXCEPTION_PTR 1
-#  elif defined(_MSC_VER)
-#    define CV__EXCEPTION_PTR (_MSC_VER >= 1600)
-#  elif defined(__clang__)
-#    define CV__EXCEPTION_PTR 0  // C++11 only (see above)
-#  elif defined(__GNUC__) && defined(__GXX_EXPERIMENTAL_CXX0X__)
-#    define CV__EXCEPTION_PTR (__GXX_EXPERIMENTAL_CXX0X__ > 0)
-#  endif
-#endif
-#ifndef CV__EXCEPTION_PTR
-#  define CV__EXCEPTION_PTR 0
-#elif CV__EXCEPTION_PTR
-#  include <exception>  // std::exception_ptr
-#endif
-
-
+#include <opencv2/core/utils/fp_control_utils.hpp>
+#include <opencv2/core/utils/fp_control.private.hpp>
 
 using namespace cv;
 
-namespace cv
-{
-    ParallelLoopBody::~ParallelLoopBody() {}
-}
+namespace cv {
 
-namespace
-{
-#ifdef CV_PARALLEL_FRAMEWORK
+ParallelLoopBody::~ParallelLoopBody() {}
+
+using namespace cv::parallel;
+
+namespace {
+
 #ifdef ENABLE_INSTRUMENTATION
     static void SyncNodes(cv::instr::InstrNode *pNode)
     {
@@ -201,6 +208,9 @@ namespace
 
             // propagate main thread state
             rng = cv::theRNG();
+#if OPENCV_SUPPORTS_FP_DENORMALS_HINT && OPENCV_IMPL_FP_HINTS
+            details::saveFPDenormalsState(fp_denormals_base_state);
+#endif
 
 #ifdef OPENCV_TRACE
             traceRootRegion = CV_TRACE_NS::details::getCurrentRegion();
@@ -267,7 +277,9 @@ namespace
         void recordException(const cv::String& msg)
 #endif
         {
+#ifndef CV_THREAD_SANITIZER
             if (!hasException)
+#endif
             {
                 cv::AutoLock lock(cv::getInitializationMutex());
                 if (!hasException)
@@ -281,6 +293,11 @@ namespace
                 }
             }
         }
+
+#if OPENCV_SUPPORTS_FP_DENORMALS_HINT && OPENCV_IMPL_FP_HINTS
+        details::FPDenormalsModeState fp_denormals_base_state;
+#endif
+
     private:
         ParallelLoopBodyWrapperContext(const ParallelLoopBodyWrapperContext&); // disabled
         ParallelLoopBodyWrapperContext& operator=(const ParallelLoopBodyWrapperContext&); // disabled
@@ -317,6 +334,9 @@ namespace
 
             // propagate main thread state
             cv::theRNG() = ctx.rng;
+#if OPENCV_SUPPORTS_FP_DENORMALS_HINT && OPENCV_IMPL_FP_HINTS
+            FPDenormalsIgnoreHintScope fp_denormals_scope(ctx.fp_denormals_base_state);
+#endif
 
             cv::Range r;
             cv::Range wholeRange = ctx.wholeRange;
@@ -383,7 +403,27 @@ namespace
             tbb::parallel_for(tbb::blocked_range<int>(range.start, range.end), *this);
         }
     };
-#elif defined HAVE_CSTRIPES || defined HAVE_OPENMP
+#elif defined HAVE_HPX
+    class ProxyLoopBody : public ParallelLoopBodyWrapper
+    {
+    public:
+        ProxyLoopBody(ParallelLoopBodyWrapperContext& ctx_)
+                : ParallelLoopBodyWrapper(ctx_)
+        {}
+
+        void operator ()() const  // run parallel job
+        {
+            cv::Range stripeRange = this->stripeRange();
+            hpx::parallel::for_loop(
+                    hpx::parallel::execution::par,
+                    stripeRange.start, stripeRange.end,
+                    [&](const int &i) { ;
+                        this->ParallelLoopBodyWrapper::operator()(
+                                cv::Range(i, i + 1));
+                    });
+        }
+    };
+#elif defined HAVE_OPENMP
     typedef ParallelLoopBodyWrapper ProxyLoopBody;
 #elif defined HAVE_GCD
     typedef ParallelLoopBodyWrapper ProxyLoopBody;
@@ -409,23 +449,21 @@ namespace
     typedef ParallelLoopBodyWrapper ProxyLoopBody;
 #endif
 
-static int numThreads = -1;
-
 #if defined HAVE_TBB
     #if TBB_INTERFACE_VERSION >= 8000
         static tbb::task_arena tbbArena(tbb::task_arena::automatic);
     #else
         static tbb::task_scheduler_init tbbScheduler(tbb::task_scheduler_init::deferred);
     #endif
-#elif defined HAVE_CSTRIPES
-// nothing for C=
+#elif defined HAVE_HPX
+// nothing for HPX
 #elif defined HAVE_OPENMP
 static inline int _initMaxThreads()
 {
     int maxThreads = omp_get_max_threads();
     if (!utils::getConfigurationParameterBool("OPENCV_FOR_OPENMP_DYNAMIC_DISABLE", false))
     {
-        omp_set_dynamic(maxThreads);
+        omp_set_dynamic(1);
     }
     return maxThreads;
 }
@@ -456,17 +494,13 @@ static SchedPtr pplScheduler;
 
 #endif
 
-#endif // CV_PARALLEL_FRAMEWORK
-
-} //namespace
+} // namespace anon
 
 /* ================================   parallel_for_  ================================ */
 
-#ifdef CV_PARALLEL_FRAMEWORK
 static void parallel_for_impl(const cv::Range& range, const cv::ParallelLoopBody& body, double nstripes); // forward declaration
-#endif
 
-void cv::parallel_for_(const cv::Range& range, const cv::ParallelLoopBody& body, double nstripes)
+void parallel_for_(const cv::Range& range, const cv::ParallelLoopBody& body, double nstripes)
 {
 #ifdef OPENCV_TRACE
     CV__TRACE_OPENCV_FUNCTION_NAME_("parallel_for", 0);
@@ -479,35 +513,41 @@ void cv::parallel_for_(const cv::Range& range, const cv::ParallelLoopBody& body,
     if (range.empty())
         return;
 
-#ifdef CV_PARALLEL_FRAMEWORK
-    static volatile int flagNestedParallelFor = 0;
-    bool isNotNestedRegion = flagNestedParallelFor == 0;
+    static std::atomic<bool> flagNestedParallelFor(false);
+    bool isNotNestedRegion = !flagNestedParallelFor.load();
     if (isNotNestedRegion)
-      isNotNestedRegion = CV_XADD(&flagNestedParallelFor, 1) == 0;
+      isNotNestedRegion = !flagNestedParallelFor.exchange(true);
     if (isNotNestedRegion)
     {
         try
         {
             parallel_for_impl(range, body, nstripes);
-            flagNestedParallelFor = 0;
+            flagNestedParallelFor = false;
         }
         catch (...)
         {
-            flagNestedParallelFor = 0;
+            flagNestedParallelFor = false;
             throw;
         }
     }
     else // nested parallel_for_() calls are not parallelized
-#endif // CV_PARALLEL_FRAMEWORK
     {
         CV_UNUSED(nstripes);
         body(range);
     }
 }
 
-#ifdef CV_PARALLEL_FRAMEWORK
+static
+void parallel_for_cb(int start, int end, void* data)
+{
+    CV_DbgAssert(data);
+    const cv::ParallelLoopBody& body = *(const cv::ParallelLoopBody*)data;
+    body(Range(start, end));
+}
+
 static void parallel_for_impl(const cv::Range& range, const cv::ParallelLoopBody& body, double nstripes)
 {
+    using namespace cv::parallel;
     if ((numThreads < 0 || numThreads > 1) && range.end - range.start > 1)
     {
         ParallelLoopBodyWrapperContext ctx(body, range, nstripes);
@@ -519,6 +559,16 @@ static void parallel_for_impl(const cv::Range& range, const cv::ParallelLoopBody
             return;
         }
 
+        std::shared_ptr<ParallelForAPI>& api = getCurrentParallelForAPI();
+        if (api)
+        {
+            CV_CheckEQ(stripeRange.start, 0, "");
+            api->parallel_for(stripeRange.end, parallel_for_cb, (void*)&pbody);
+            ctx.finalize();  // propagate exceptions if exists
+            return;
+        }
+
+#ifdef CV_PARALLEL_FRAMEWORK
 #if defined HAVE_TBB
 
 #if TBB_INTERFACE_VERSION >= 8000
@@ -527,16 +577,8 @@ static void parallel_for_impl(const cv::Range& range, const cv::ParallelLoopBody
         pbody();
 #endif
 
-#elif defined HAVE_CSTRIPES
-
-        parallel(MAX(0, numThreads))
-        {
-            int offset = stripeRange.start;
-            int len = stripeRange.end - offset;
-            Range r(offset + CPX_RANGE_START(len), offset + CPX_RANGE_END(len));
-            pbody(r);
-            barrier();
-        }
+#elif defined HAVE_HPX
+        pbody();
 
 #elif defined HAVE_OPENMP
 
@@ -577,23 +619,24 @@ static void parallel_for_impl(const cv::Range& range, const cv::ParallelLoopBody
 #endif
 
         ctx.finalize();  // propagate exceptions if exists
-    }
-    else
-    {
-        body(range);
-    }
-}
+        return;
 #endif // CV_PARALLEL_FRAMEWORK
+    }
+
+    body(range);
+}
 
 
-int cv::getNumThreads(void)
+int getNumThreads(void)
 {
-#ifdef CV_PARALLEL_FRAMEWORK
+    std::shared_ptr<ParallelForAPI>& api = getCurrentParallelForAPI();
+    if (api)
+    {
+        return api->getNumThreads();
+    }
 
-    if(numThreads == 0)
+    if (numThreads == 0)
         return 1;
-
-#endif
 
 #if defined HAVE_TBB
 
@@ -609,11 +652,8 @@ int cv::getNumThreads(void)
            : tbb::task_scheduler_init::default_num_threads();
 #endif
 
-#elif defined HAVE_CSTRIPES
-
-    return numThreads > 0
-            ? numThreads
-            : cv::getNumberOfCPUs();
+#elif defined HAVE_HPX
+    return numThreads;
 
 #elif defined HAVE_OPENMP
 
@@ -632,9 +672,9 @@ int cv::getNumThreads(void)
 
 #elif defined HAVE_CONCURRENCY
 
-    return 1 + (pplScheduler == 0
+    return (pplScheduler == 0)
         ? Concurrency::CurrentScheduler::Get()->GetNumberOfVirtualProcessors()
-        : pplScheduler->GetNumberOfVirtualProcessors());
+        : (1 + pplScheduler->GetNumberOfVirtualProcessors());
 
 #elif defined HAVE_PTHREADS_PF
 
@@ -647,7 +687,6 @@ int cv::getNumThreads(void)
 #endif
 }
 
-namespace cv {
 unsigned defaultNumberOfThreads()
 {
 #ifdef __ANDROID__
@@ -669,15 +708,19 @@ unsigned defaultNumberOfThreads()
     }
     return result;
 }
-}
 
-void cv::setNumThreads( int threads_ )
+void setNumThreads( int threads_ )
 {
     CV_UNUSED(threads_);
-#ifdef CV_PARALLEL_FRAMEWORK
+
     int threads = (threads_ < 0) ? defaultNumberOfThreads() : (unsigned)threads_;
     numThreads = threads;
-#endif
+
+    std::shared_ptr<ParallelForAPI>& api = getCurrentParallelForAPI();
+    if (api)
+    {
+        api->setNumThreads(numThreads);
+    }
 
 #ifdef HAVE_TBB
 
@@ -689,9 +732,8 @@ void cv::setNumThreads( int threads_ )
     if(threads > 0) tbbScheduler.initialize(threads);
 #endif
 
-#elif defined HAVE_CSTRIPES
-
-    return; // nothing needed
+#elif defined HAVE_HPX
+    return; // nothing needed as numThreads is used
 
 #elif defined HAVE_OPENMP
 
@@ -732,8 +774,14 @@ void cv::setNumThreads( int threads_ )
 }
 
 
-int cv::getThreadNum(void)
+int getThreadNum()
 {
+    std::shared_ptr<ParallelForAPI>& api = getCurrentParallelForAPI();
+    if (api)
+    {
+        return api->getThreadNum();
+    }
+
 #if defined HAVE_TBB
     #if TBB_INTERFACE_VERSION >= 9100
         return tbb::this_task_arena::current_thread_index();
@@ -742,8 +790,8 @@ int cv::getThreadNum(void)
     #else
         return 0;
     #endif
-#elif defined HAVE_CSTRIPES
-    return pix();
+#elif defined HAVE_HPX
+    return (int)(hpx::get_num_worker_threads());
 #elif defined HAVE_OPENMP
     return omp_get_thread_num();
 #elif defined HAVE_GCD
@@ -759,19 +807,40 @@ int cv::getThreadNum(void)
 #endif
 }
 
-#ifdef __ANDROID__
-static inline int getNumberOfCPUsImpl()
+
+#if defined __linux__ || defined __GLIBC__ || defined __HAIKU__ || defined __ANDROID__
+  #define CV_CPU_GROUPS_1
+#endif
+
+#if defined __linux__ || defined __ANDROID__
+  #define CV_HAVE_CGROUPS 1
+#endif
+
+#if defined CV_CPU_GROUPS_1
+static inline
+std::string getFileContents(const char *filename)
 {
-   FILE* cpuPossible = fopen("/sys/devices/system/cpu/possible", "r");
-   if(!cpuPossible)
-       return 1;
+    std::ifstream ifs(filename);
+    if (!ifs.is_open())
+        return std::string();
 
-   char buf[2000]; //big enough for 1000 CPUs in worst possible configuration
-   char* pbuf = fgets(buf, sizeof(buf), cpuPossible);
-   fclose(cpuPossible);
-   if(!pbuf)
-      return 1;
+    std::string content( (std::istreambuf_iterator<char>(ifs) ),
+                         (std::istreambuf_iterator<char>()    ) );
 
+    if (ifs.fail())
+        return std::string();
+
+    return content;
+}
+
+static inline
+int getNumberOfCPUsImpl(const char *filename)
+{
+   std::string file_contents = getFileContents(filename);
+   if(file_contents.empty())
+       return 0;
+
+   char *pbuf = const_cast<char*>(file_contents.c_str());
    //parse string of form "0-1,3,5-7,10,13-15"
    int cpusAvailable = 0;
 
@@ -795,27 +864,81 @@ static inline int getNumberOfCPUsImpl()
       }
 
    }
-   return cpusAvailable ? cpusAvailable : 1;
+   return cpusAvailable;
 }
 #endif
 
-int cv::getNumberOfCPUs(void)
+#if defined CV_HAVE_CGROUPS
+static inline
+unsigned getNumberOfCPUsCFS()
 {
+    int cfs_quota = 0;
+    {
+        std::ifstream ss_period("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", std::ios::in | std::ios::binary);
+        ss_period >> cfs_quota;
+
+        if (ss_period.fail() || cfs_quota < 1) /* cfs_quota must not be 0 or negative */
+            return 0;
+    }
+
+    int cfs_period = 0;
+    {
+        std::ifstream ss_quota("/sys/fs/cgroup/cpu/cpu.cfs_period_us", std::ios::in | std::ios::binary);
+        ss_quota >> cfs_period;
+
+        if (ss_quota.fail() || cfs_period < 1)
+            return 0;
+    }
+
+    return (unsigned)max(1, cfs_quota/cfs_period);
+}
+#endif
+
+template <typename T> static inline
+T minNonZero(const T& val_1, const T& val_2)
+{
+    if ((val_1 != 0) && (val_2 != 0))
+        return std::min(val_1, val_2);
+    return (val_1 != 0) ? val_1 : val_2;
+}
+
+#ifndef OPENCV_DISABLE_THREAD_SUPPORT
+static
+int getNumberOfCPUs_()
+{
+#ifndef OPENCV_SEMIHOSTING
+    /*
+     * Logic here is to try different methods of getting CPU counts and return
+     * the minimum most value as it has high probablity of being right and safe.
+     * Return 1 if we get 0 or not found on all methods.
+    */
+#if defined CV_CXX11 \
+    && !defined(__MINGW32__) /* not implemented (2020-03) */ \
+
+    /*
+     * Check for this standard C++11 way, we do not return directly because
+     * running in a docker or K8s environment will mean this is the host
+     * machines config not the containers or pods and as per docs this value
+     * must be "considered only a hint".
+    */
+    unsigned ncpus = std::thread::hardware_concurrency(); /* If the value is not well defined or not computable, returns 0 */
+#else
+    unsigned ncpus = 0; /* 0 means we have to find out some other way */
+#endif
+
 #if defined _WIN32
-    SYSTEM_INFO sysinfo;
-#if (defined(_M_ARM) || defined(_M_X64) || defined(WINRT)) && _WIN32_WINNT >= 0x501
+
+    SYSTEM_INFO sysinfo = {};
+#if (defined(_M_ARM) || defined(_M_ARM64) || defined(_M_X64) || defined(WINRT)) && _WIN32_WINNT >= 0x501
     GetNativeSystemInfo( &sysinfo );
 #else
     GetSystemInfo( &sysinfo );
 #endif
+    unsigned ncpus_sysinfo = sysinfo.dwNumberOfProcessors;
+    ncpus = minNonZero(ncpus, ncpus_sysinfo);
 
-    return (int)sysinfo.dwNumberOfProcessors;
-#elif defined __ANDROID__
-    static int ncpus = getNumberOfCPUsImpl();
-    return ncpus;
-#elif defined __linux__ || defined __GLIBC__ || defined __HAIKU__
-    return (int)sysconf( _SC_NPROCESSORS_ONLN );
 #elif defined __APPLE__
+
     int numCPU=0;
     int mib[4];
     size_t len = sizeof(numCPU);
@@ -836,19 +959,78 @@ int cv::getNumberOfCPUs(void)
             numCPU = 1;
     }
 
-    return (int)numCPU;
-#else
-    return 1;
+    ncpus = minNonZero(ncpus, (unsigned)numCPU);
+
+#elif defined CV_CPU_GROUPS_1
+
+#if defined CV_HAVE_CGROUPS
+    static unsigned ncpus_impl_cpuset = (unsigned)getNumberOfCPUsImpl("/sys/fs/cgroup/cpuset/cpuset.cpus");
+    ncpus = minNonZero(ncpus, ncpus_impl_cpuset);
+
+    static unsigned ncpus_impl_cfs = getNumberOfCPUsCFS();
+    ncpus = minNonZero(ncpus, ncpus_impl_cfs);
 #endif
+
+    static unsigned ncpus_impl_devices = (unsigned)getNumberOfCPUsImpl("/sys/devices/system/cpu/online");
+    ncpus = minNonZero(ncpus, ncpus_impl_devices);
+
+#endif
+
+#if defined _GNU_SOURCE \
+    && !defined(__MINGW32__) /* not implemented (2020-03) */ \
+    && !defined(__EMSCRIPTEN__) \
+    && !defined(__ANDROID__)  // TODO: add check for modern Android NDK
+
+    cpu_set_t cpu_set;
+    if (0 == sched_getaffinity(0, sizeof(cpu_set), &cpu_set))
+    {
+        unsigned cpu_count_cpu_set = CPU_COUNT(&cpu_set);
+        ncpus = minNonZero(ncpus, cpu_count_cpu_set);
+    }
+
+#endif
+
+#if !defined(_WIN32) && !defined(__APPLE__) && defined(_SC_NPROCESSORS_ONLN)
+
+    static unsigned cpu_count_sysconf = (unsigned)sysconf( _SC_NPROCESSORS_ONLN );
+    ncpus = minNonZero(ncpus, cpu_count_sysconf);
+
+#endif
+
+    return ncpus != 0 ? ncpus : 1;
+#else //  OPENCV_SEMIHOSTING
+    return 1;
+#endif //OPENCV_SEMIHOSTING
 }
 
-const char* cv::currentParallelFramework() {
+int getNumberOfCPUs()
+{
+    static int nCPUs = getNumberOfCPUs_();
+    return nCPUs;  // cached value
+}
+
+#else  // OPENCV_DISABLE_THREAD_SUPPORT
+int getNumberOfCPUs()
+{
+    return 1;
+}
+#endif  // OPENCV_DISABLE_THREAD_SUPPORT
+
+const char* currentParallelFramework()
+{
+    std::shared_ptr<ParallelForAPI>& api = getCurrentParallelForAPI();
+    if (api)
+    {
+        return api->getName();
+    }
 #ifdef CV_PARALLEL_FRAMEWORK
     return CV_PARALLEL_FRAMEWORK;
 #else
     return NULL;
 #endif
 }
+
+}  // namespace cv::
 
 CV_IMPL void cvSetNumThreads(int nt)
 {

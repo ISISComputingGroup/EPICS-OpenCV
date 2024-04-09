@@ -99,7 +99,7 @@ static void checkParamGrid(const ParamGrid& pg)
     if( pg.minVal < DBL_EPSILON )
         CV_Error( CV_StsBadArg, "Lower bound of the grid must be positive" );
     if( pg.logStep < 1. + FLT_EPSILON )
-        CV_Error( CV_StsBadArg, "Grid step must greater then 1" );
+        CV_Error( CV_StsBadArg, "Grid step must greater than 1" );
 }
 
 // SVM training parameters
@@ -200,19 +200,21 @@ public:
     {
         int j;
         calc_non_rbf_base( vcount, var_count, vecs, another, results,
-                          -2*params.gamma, -2*params.coef0 );
+                          2*params.gamma, 2*params.coef0 );
         // TODO: speedup this
         for( j = 0; j < vcount; j++ )
         {
             Qfloat t = results[j];
-            Qfloat e = std::exp(-std::abs(t));
-            if( t > 0 )
-                results[j] = (Qfloat)((1. - e)/(1. + e));
-            else
-                results[j] = (Qfloat)((e - 1.)/(e + 1.));
+            Qfloat e = std::exp(std::abs(t));          // Inf value is possible here
+            Qfloat r = (Qfloat)((e - 1.) / (e + 1.));  // NaN value is possible here (Inf/Inf or similar)
+            if (cvIsNaN(r))
+                r = std::numeric_limits<Qfloat>::infinity();
+            if (t < 0)
+                r = -r;
+            CV_DbgAssert(!cvIsNaN(r));
+            results[j] = r;
         }
     }
-
 
     void calc_rbf( int vcount, int var_count, const float* vecs,
                    const float* another, Qfloat* results )
@@ -328,7 +330,7 @@ public:
         const Qfloat max_val = (Qfloat)(FLT_MAX*1e-3);
         for( int j = 0; j < vcount; j++ )
         {
-            if( results[j] > max_val )
+            if (!(results[j] <= max_val))  // handle NaNs too
                 results[j] = max_val;
         }
     }
@@ -636,18 +638,12 @@ public:
         #undef is_lower_bound
         #define is_lower_bound(i) (alpha_status[i] < 0)
 
-        #undef is_free
-        #define is_free(i) (alpha_status[i] == 0)
-
         #undef get_C
         #define get_C(i) (C[y[i]>0])
 
         #undef update_alpha_status
         #define update_alpha_status(i) \
             alpha_status[i] = (schar)(alpha[i] >= get_C(i) ? 1 : alpha[i] <= 0 ? -1 : 0)
-
-        #undef reconstruct_gradient
-        #define reconstruct_gradient() /* empty for now */
 
         bool solve_generic( SolutionInfo& si )
         {
@@ -1250,7 +1246,7 @@ public:
         uncompressed_sv.release();
     }
 
-    Mat getUncompressedSupportVectors_() const
+    Mat getUncompressedSupportVectors() const CV_OVERRIDE
     {
         return uncompressed_sv;
     }
@@ -1310,8 +1306,6 @@ public:
 
             if( kernelType != SIGMOID && kernelType != POLY )
                 params.coef0 = 0;
-            else if( params.coef0 < 0 )
-                CV_Error( CV_StsOutOfRange, "The kernel parameter <coef0> must be positive or zero" );
 
             if( kernelType != POLY )
                 params.degree = 0;
@@ -1451,7 +1445,7 @@ public:
             sortSamplesByClasses( _samples, _responses, sidx_all, class_ranges );
 
             //check that while cross-validation there were the samples from all the classes
-            if( class_ranges[class_count] <= 0 )
+            if ((int)class_ranges.size() < class_count + 1)
                 CV_Error( CV_StsBadArg, "While cross-validation one or more of the classes have "
                 "been fell out of the sample. Try to reduce <Params::k_fold>" );
 
@@ -1613,6 +1607,7 @@ public:
 
     bool train( const Ptr<TrainData>& data, int ) CV_OVERRIDE
     {
+        CV_Assert(!data.empty());
         clear();
 
         checkParams();
@@ -1739,6 +1734,7 @@ public:
                     ParamGrid nu_grid, ParamGrid coef_grid, ParamGrid degree_grid,
                     bool balanced ) CV_OVERRIDE
     {
+        CV_Assert(!data.empty());
         checkParams();
 
         int svmType = params.svmType;
@@ -1952,6 +1948,7 @@ public:
                             const DecisionFunc& df = svm->decision_func[dfi];
                             sum = -df.rho;
                             int sv_count = svm->getSVCount(dfi);
+                            CV_DbgAssert(sv_count > 0);
                             const double* alpha = &svm->df_alpha[df.ofs];
                             const int* sv_index = &svm->df_index[df.ofs];
                             for( k = 0; k < sv_count; k++ )
@@ -1982,10 +1979,10 @@ public:
         bool returnDFVal;
     };
 
-    bool trainAuto_(InputArray samples, int layout,
+    bool trainAuto(InputArray samples, int layout,
             InputArray responses, int kfold, Ptr<ParamGrid> Cgrid,
             Ptr<ParamGrid> gammaGrid, Ptr<ParamGrid> pGrid, Ptr<ParamGrid> nuGrid,
-            Ptr<ParamGrid> coeffGrid, Ptr<ParamGrid> degreeGrid, bool balanced)
+            Ptr<ParamGrid> coeffGrid, Ptr<ParamGrid> degreeGrid, bool balanced) CV_OVERRIDE
     {
         Ptr<TrainData> data = TrainData::create(samples, layout, responses);
         return this->trainAuto(
@@ -2353,26 +2350,6 @@ Ptr<SVM> SVM::load(const String& filepath)
     return svm;
 }
 
-Mat SVM::getUncompressedSupportVectors() const
-{
-    const SVMImpl* this_ = dynamic_cast<const SVMImpl*>(this);
-    if(!this_)
-        CV_Error(Error::StsNotImplemented, "the class is not SVMImpl");
-    return this_->getUncompressedSupportVectors_();
-}
-
-bool SVM::trainAuto(InputArray samples, int layout,
-            InputArray responses, int kfold, Ptr<ParamGrid> Cgrid,
-            Ptr<ParamGrid> gammaGrid, Ptr<ParamGrid> pGrid, Ptr<ParamGrid> nuGrid,
-            Ptr<ParamGrid> coeffGrid, Ptr<ParamGrid> degreeGrid, bool balanced)
-{
-  SVMImpl* this_ = dynamic_cast<SVMImpl*>(this);
-  if (!this_) {
-    CV_Error(Error::StsNotImplemented, "the class is not SVMImpl");
-  }
-  return this_->trainAuto_(samples, layout, responses,
-    kfold, Cgrid, gammaGrid, pGrid, nuGrid, coeffGrid, degreeGrid, balanced);
-}
 
 }
 }

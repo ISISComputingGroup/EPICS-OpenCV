@@ -40,6 +40,9 @@
 //M*/
 
 #include "../precomp.hpp"
+
+#include <opencv2/core/utils/fp_control_utils.hpp>
+
 #include <limits>
 #include <set>
 #include <map>
@@ -51,7 +54,7 @@
 
 namespace cv {
 namespace dnn {
-CV__DNN_EXPERIMENTAL_NS_BEGIN
+CV__DNN_INLINE_NS_BEGIN
 
 using namespace TH;
 
@@ -106,6 +109,8 @@ static inline bool endsWith(const String &str, const char *substr)
 
 struct TorchImporter
 {
+    FPDenormalsIgnoreHintScope fp_denormals_ignore_scope;
+
     typedef std::map<String, std::pair<int, Mat> > TensorsMap;
     Net net;
 
@@ -312,7 +317,7 @@ struct TorchImporter
             fpos = THFile_position(file);
             int ktype = readInt();
 
-            if (ktype != TYPE_STRING) //skip non-string fileds
+            if (ktype != TYPE_STRING) //skip non-string fields
             {
                 THFile_seek(file, fpos);
                 readObject(); //key
@@ -865,15 +870,13 @@ struct TorchImporter
                 layerParams.set("indices_blob_id", tensorParams["indices"].first);
                 curModule->modules.push_back(newModule);
             }
-            else if (nnName == "SoftMax")
+            else if (nnName == "LogSoftMax" || nnName == "SoftMax")
             {
-                newModule->apiType = "SoftMax";
-                curModule->modules.push_back(newModule);
-            }
-            else if (nnName == "LogSoftMax")
-            {
-                newModule->apiType = "SoftMax";
-                layerParams.set("log_softmax", true);
+                newModule->apiType = "Softmax";
+                layerParams.set("log_softmax", nnName == "LogSoftMax");
+                // set default axis to 1
+                if(!layerParams.has("axis"))
+                    layerParams.set("axis", 1);
                 curModule->modules.push_back(newModule);
             }
             else if (nnName == "SpatialCrossMapLRN")
@@ -954,7 +957,7 @@ struct TorchImporter
                 int size = scalarParams.get<int>("size");
 
                 int begins[] = {0, 0, size, size};
-                int ends[] = {-1, -1, -size - 1, -size - 1};
+                int ends[] = {INT_MAX, INT_MAX, -size, -size};
 
                 newModule->apiType = "Slice";
                 layerParams.set("begin", DictValue::arrayInt<int*>(&begins[0], 4));
@@ -1263,5 +1266,5 @@ Net readNetFromTorch(const String &model, bool isBinary, bool evaluate)
     return net;
 }
 
-CV__DNN_EXPERIMENTAL_NS_END
+CV__DNN_INLINE_NS_END
 }} // namespace

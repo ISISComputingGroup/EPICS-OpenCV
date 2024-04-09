@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define WEBP_DECODER_ABI_VERSION 0x0208    // MAJOR(8b) + MINOR(8b)
+#define WEBP_DECODER_ABI_VERSION 0x0209    // MAJOR(8b) + MINOR(8b)
 
 // Note: forward declaring enumerations is not allowed in (strict) C and C++,
 // the types are left here for reference.
@@ -42,6 +42,12 @@ WEBP_EXTERN int WebPGetDecoderVersion(void);
 // This function will also validate the header, returning true on success,
 // false otherwise. '*width' and '*height' are only valid on successful return.
 // Pointers 'width' and 'height' can be passed NULL if deemed irrelevant.
+// Note: The following chunk sequences (before the raw VP8/VP8L data) are
+// considered valid by this function:
+// RIFF + VP8(L)
+// RIFF + VP8X + (optional chunks) + VP8(L)
+// ALPH + VP8 <-- Not a valid WebP format: only allowed for internal purpose.
+// VP8(L)     <-- Not a valid WebP format: only allowed for internal purpose.
 WEBP_EXTERN int WebPGetInfo(const uint8_t* data, size_t data_size,
                             int* width, int* height);
 
@@ -75,18 +81,16 @@ WEBP_EXTERN uint8_t* WebPDecodeBGR(const uint8_t* data, size_t data_size,
 // returned is the Y samples buffer. Upon return, *u and *v will point to
 // the U and V chroma data. These U and V buffers need NOT be passed to
 // WebPFree(), unlike the returned Y luma one. The dimension of the U and V
-// planes are both (*width + 1) / 2 and (*height + 1)/ 2.
+// planes are both (*width + 1) / 2 and (*height + 1) / 2.
 // Upon return, the Y buffer has a stride returned as '*stride', while U and V
 // have a common stride returned as '*uv_stride'.
-// Return NULL in case of error.
-// (*) Also named Y'CbCr. See: http://en.wikipedia.org/wiki/YCbCr
+// 'width' and 'height' may be NULL, the other pointers must not be.
+// Returns NULL in case of error.
+// (*) Also named Y'CbCr. See: https://en.wikipedia.org/wiki/YCbCr
 WEBP_EXTERN uint8_t* WebPDecodeYUV(const uint8_t* data, size_t data_size,
                                    int* width, int* height,
                                    uint8_t** u, uint8_t** v,
                                    int* stride, int* uv_stride);
-
-// Releases memory returned by the WebPDecode*() functions above.
-WEBP_EXTERN void WebPFree(void* ptr);
 
 // These five functions are variants of the above ones, that decode the image
 // directly into a pre-allocated buffer 'output_buffer'. The maximum storage
@@ -247,23 +251,24 @@ typedef enum VP8StatusCode {
 // WebPIDecoder object. This object can be left in a SUSPENDED state if the
 // picture is only partially decoded, pending additional input.
 // Code example:
-//
-//   WebPInitDecBuffer(&output_buffer);
-//   output_buffer.colorspace = mode;
-//   ...
-//   WebPIDecoder* idec = WebPINewDecoder(&output_buffer);
-//   while (additional_data_is_available) {
-//     // ... (get additional data in some new_data[] buffer)
-//     status = WebPIAppend(idec, new_data, new_data_size);
-//     if (status != VP8_STATUS_OK && status != VP8_STATUS_SUSPENDED) {
-//       break;    // an error occurred.
-//     }
-//
-//     // The above call decodes the current available buffer.
-//     // Part of the image can now be refreshed by calling
-//     // WebPIDecGetRGB()/WebPIDecGetYUVA() etc.
-//   }
-//   WebPIDelete(idec);
+/*
+     WebPInitDecBuffer(&output_buffer);
+     output_buffer.colorspace = mode;
+     ...
+     WebPIDecoder* idec = WebPINewDecoder(&output_buffer);
+     while (additional_data_is_available) {
+       // ... (get additional data in some new_data[] buffer)
+       status = WebPIAppend(idec, new_data, new_data_size);
+       if (status != VP8_STATUS_OK && status != VP8_STATUS_SUSPENDED) {
+         break;    // an error occurred.
+       }
+
+       // The above call decodes the current available buffer.
+       // Part of the image can now be refreshed by calling
+       // WebPIDecGetRGB()/WebPIDecGetYUVA() etc.
+     }
+     WebPIDelete(idec);
+*/
 
 // Creates a new incremental decoder with the supplied buffer parameter.
 // This output_buffer can be passed NULL, in which case a default output buffer
@@ -385,7 +390,7 @@ WEBP_EXTERN const WebPDecBuffer* WebPIDecodedArea(
      CHECK(WebPGetFeatures(data, data_size, &config.input) == VP8_STATUS_OK);
 
      // C) Adjust 'config', if needed
-     config.no_fancy_upsampling = 1;
+     config.options.no_fancy_upsampling = 1;
      config.output.colorspace = MODE_BGRA;
      // etc.
 
@@ -425,6 +430,12 @@ WEBP_EXTERN VP8StatusCode WebPGetFeaturesInternal(
 // Returns VP8_STATUS_OK when the features are successfully retrieved. Returns
 // VP8_STATUS_NOT_ENOUGH_DATA when more data is needed to retrieve the
 // features from headers. Returns error in other cases.
+// Note: The following chunk sequences (before the raw VP8/VP8L data) are
+// considered valid by this function:
+// RIFF + VP8(L)
+// RIFF + VP8X + (optional chunks) + VP8(L)
+// ALPH + VP8 <-- Not a valid WebP format: only allowed for internal purpose.
+// VP8(L)     <-- Not a valid WebP format: only allowed for internal purpose.
 static WEBP_INLINE VP8StatusCode WebPGetFeatures(
     const uint8_t* data, size_t data_size,
     WebPBitstreamFeatures* features) {
@@ -444,7 +455,7 @@ struct WebPDecoderOptions {
   int scaled_width, scaled_height;    // final resolution
   int use_threads;                    // if true, use multi-threaded decoding
   int dithering_strength;             // dithering strength (0=Off, 100=full)
-  int flip;                           // flip output vertically
+  int flip;                           // if true, flip output vertically
   int alpha_dithering_strength;       // alpha dithering strength in [0..100]
 
   uint32_t pad[5];                    // padding for later use
@@ -491,4 +502,4 @@ WEBP_EXTERN VP8StatusCode WebPDecode(const uint8_t* data, size_t data_size,
 }    // extern "C"
 #endif
 
-#endif  /* WEBP_WEBP_DECODE_H_ */
+#endif  // WEBP_WEBP_DECODE_H_

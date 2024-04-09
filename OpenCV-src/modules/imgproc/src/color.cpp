@@ -3,6 +3,7 @@
 // of this distribution and at http://opencv.org/license.html
 
 #include "precomp.hpp"
+#include "opencl_kernels_imgproc.hpp"
 #include "color.hpp"
 
 namespace cv
@@ -88,6 +89,20 @@ static bool ocl_cvtColor( InputArray _src, OutputArray _dst, int code, int dcn )
         uidx = 1 - yidx + uidx;
 
         return oclCvtColorOnePlaneYUV2BGR(_src, _dst, dcn, bidx, uidx, yidx);
+    }
+    case COLOR_RGB2YUV_UYVY: case COLOR_BGR2YUV_UYVY: case COLOR_RGBA2YUV_UYVY: case COLOR_BGRA2YUV_UYVY:
+    case COLOR_RGB2YUV_YUY2: case COLOR_BGR2YUV_YUY2: case COLOR_RGB2YUV_YVYU: case COLOR_BGR2YUV_YVYU:
+    case COLOR_RGBA2YUV_YUY2: case COLOR_BGRA2YUV_YUY2: case COLOR_RGBA2YUV_YVYU: case COLOR_BGRA2YUV_YVYU:
+    {
+        int yidx = (code==COLOR_RGB2YUV_UYVY || code==COLOR_RGBA2YUV_UYVY ||
+                    code==COLOR_BGR2YUV_UYVY || code==COLOR_BGRA2YUV_UYVY) ? 1 : 0;
+        int uidx = (code==COLOR_RGB2YUV_YVYU || code==COLOR_RGBA2YUV_YVYU ||
+                    code==COLOR_BGR2YUV_YVYU || code==COLOR_BGRA2YUV_YVYU) ? 2 : 0;
+        uidx = 1 - yidx + uidx;
+
+        bool res = oclCvtColorOnePlaneBGR2YUV(_src, _dst, dcn, bidx, uidx, yidx);
+
+        return res;
     }
     case COLOR_BGR2YCrCb:
     case COLOR_RGB2YCrCb:
@@ -191,7 +206,10 @@ void cvtColor( InputArray _src, OutputArray _dst, int code, int dcn )
     {
         case COLOR_BGR2BGRA: case COLOR_RGB2BGRA: case COLOR_BGRA2BGR:
         case COLOR_RGBA2BGR: case COLOR_RGB2BGR:  case COLOR_BGRA2RGBA:
-            cvtColorBGR2BGR(_src, _dst, dcn, swapBlue(code));
+            if(_src.channels() == 1)
+                cvtColorGray2BGR(_src, _dst, dcn);
+            else
+                cvtColorBGR2BGR(_src, _dst, dcn, swapBlue(code));
             break;
 
         case COLOR_BGR2BGR565:  case COLOR_BGR2BGR555: case COLOR_BGRA2BGR565: case COLOR_BGRA2BGR555:
@@ -332,6 +350,19 @@ void cvtColor( InputArray _src, OutputArray _dst, int code, int dcn )
                 int ycn  = (code==COLOR_YUV2RGB_UYVY || code==COLOR_YUV2BGR_UYVY ||
                             code==COLOR_YUV2RGBA_UYVY || code==COLOR_YUV2BGRA_UYVY) ? 1 : 0;
                 cvtColorOnePlaneYUV2BGR(_src, _dst, dcn, swapBlue(code), uIndex(code), ycn);
+                break;
+            }
+
+        case COLOR_RGB2YUV_UYVY: case COLOR_BGR2YUV_UYVY: case COLOR_RGBA2YUV_UYVY: case COLOR_BGRA2YUV_UYVY:
+        case COLOR_RGB2YUV_YUY2: case COLOR_BGR2YUV_YUY2: case COLOR_RGB2YUV_YVYU: case COLOR_BGR2YUV_YVYU:
+        case COLOR_RGBA2YUV_YUY2: case COLOR_BGRA2YUV_YUY2: case COLOR_RGBA2YUV_YVYU: case COLOR_BGRA2YUV_YVYU:
+            //http://www.fourcc.org/yuv.php#UYVY
+            //http://www.fourcc.org/yuv.php#YUY2
+            //http://www.fourcc.org/yuv.php#YVYU
+            {
+                int ycn  = (code==COLOR_RGB2YUV_UYVY ||  code==COLOR_BGR2YUV_UYVY ||
+                            code==COLOR_RGBA2YUV_UYVY || code==COLOR_BGRA2YUV_UYVY) ? 1 : 0;
+                cvtColorOnePlaneBGR2YUV(_src, _dst, swapBlue(code), uIndex(code), ycn);
                 break;
             }
 
