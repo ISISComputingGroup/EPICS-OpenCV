@@ -97,7 +97,7 @@ cvReadChainPoint( CvChainPtReader * reader )
 
         reader->ptr = ptr;
         reader->code = (schar)code;
-        assert( (code & ~7) == 0 );
+        CV_Assert( (code & ~7) == 0 );
         reader->pt.x = pt.x + icvCodeDeltas[code].x;
         reader->pt.y = pt.y + icvCodeDeltas[code].y;
     }
@@ -170,12 +170,9 @@ typedef struct _CvContourScanner
 }
 _CvContourScanner;
 
-#define _CV_FIND_CONTOURS_FLAGS_EXTERNAL_ONLY    1
-#define _CV_FIND_CONTOURS_FLAGS_HIERARCHIC       2
-
 /*
    Initializes scanner structure.
-   Prepare image for scanning ( clear borders and convert all pixels to 0-1.
+   Prepare image for scanning ( clear borders and convert all pixels to 0-1 ).
 */
 static CvContourScanner
 cvStartFindContours_Impl( void* _img, CvMemStorage* storage,
@@ -214,7 +211,7 @@ cvStartFindContours_Impl( void* _img, CvMemStorage* storage,
     scanner->img = (schar *) (img + step);
     scanner->img_step = step;
     scanner->img_size.width = size.width - 1;   /* exclude rightest column */
-    scanner->img_size.height = size.height - 1; /* exclude bottomost row */
+    scanner->img_size.height = size.height - 1; /* exclude bottommost row */
     scanner->mode = mode;
     scanner->offset = offset;
     scanner->pt.x = scanner->pt.y = 1;
@@ -625,7 +622,8 @@ icvFetchContour( schar                  *ptr,
 
 /*
    trace contour until certain point is met.
-   returns 1 if met, 0 else.
+   returns 1 if met and this is the last contour
+   encountered by a raster scan reaching the point, 0 else.
 */
 static int
 icvTraceContour( schar *ptr, int step, schar *stop_ptr, int is_hole )
@@ -668,14 +666,39 @@ icvTraceContour( schar *ptr, int step, schar *stop_ptr, int is_hole )
                     break;
             }
 
-            if( i3 == stop_ptr || (i4 == i0 && i3 == i1) )
+            if (i3 == stop_ptr) {
+                if (!(*i3 & 0x80)) {
+                    /* it's the only contour */
+                    return 1;
+                }
+
+                /* check if this is the last contour */
+                /* encountered during a raster scan  */
+                schar *i5;
+                int t = s;
+                while (true)
+                {
+                    t = (t - 1) & 7;
+                    i5 = i3 + deltas[t];
+                    if (*i5 != 0)
+                        break;
+                    if (t == 0)
+                        return 1;
+                }
+            }
+
+            if( (i4 == i0 && i3 == i1) )
                 break;
 
             i3 = i4;
             s = (s + 4) & 7;
         }                       /* end of border following loop */
     }
-    return i3 == stop_ptr;
+    else {
+        return i3 == stop_ptr;
+    }
+
+    return 0;
 }
 
 
@@ -1054,7 +1077,7 @@ cvFindNextContour( CvContourScanner scanner )
             }
             else
             {
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
                 if ((p = img[x]) != prev)
                 {
                     goto _next_contour;
@@ -1062,12 +1085,12 @@ cvFindNextContour( CvContourScanner scanner )
                 else
                 {
                     v_uint8 v_prev = vx_setall_u8((uchar)prev);
-                    for (; x <= width - v_uint8::nlanes; x += v_uint8::nlanes)
+                    for (; x <= width - VTraits<v_uint8>::vlanes(); x += VTraits<v_uint8>::vlanes())
                     {
-                        unsigned int mask = (unsigned int)v_signmask(vx_load((uchar*)(img + x)) != v_prev);
-                        if (mask)
+                        v_uint8 vmask = (v_ne(vx_load((uchar *)(img + x)), v_prev));
+                        if (v_check_any(vmask))
                         {
-                            p = img[(x += cv::trailingZeros32(mask))];
+                            p = img[(x += v_scan_forward(vmask))];
                             goto _next_contour;
                         }
                     }
@@ -1079,7 +1102,7 @@ cvFindNextContour( CvContourScanner scanner )
 
             if( x >= width )
                 break;
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
         _next_contour:
 #endif
             {
@@ -1161,7 +1184,7 @@ cvFindNextContour( CvContourScanner scanner )
                     }
 
                     /* hole flag of the parent must differ from the flag of the contour */
-                    assert( par_info->is_hole != is_hole );
+                    CV_Assert( par_info->is_hole != is_hole );
                     if( par_info->contour == 0 )        /* removed contour */
                         goto resume_scan;
                 }
@@ -1327,14 +1350,14 @@ CvLinkedRunPoint;
 
 inline int findStartContourPoint(uchar *src_data, CvSize img_size, int j)
 {
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
     v_uint8 v_zero = vx_setzero_u8();
-    for (; j <= img_size.width - v_uint8::nlanes; j += v_uint8::nlanes)
+    for (; j <= img_size.width - VTraits<v_uint8>::vlanes(); j += VTraits<v_uint8>::vlanes())
     {
-        unsigned int mask = (unsigned int)v_signmask(vx_load((uchar*)(src_data + j)) != v_zero);
-        if (mask)
+        v_uint8 vmask = (v_ne(vx_load((uchar *)(src_data + j)), v_zero));
+        if (v_check_any(vmask))
         {
-            j += cv::trailingZeros32(mask);
+            j += v_scan_forward(vmask);
             return j;
         }
     }
@@ -1346,7 +1369,7 @@ inline int findStartContourPoint(uchar *src_data, CvSize img_size, int j)
 
 inline int findEndContourPoint(uchar *src_data, CvSize img_size, int j)
 {
-#if CV_SIMD
+#if (CV_SIMD || CV_SIMD_SCALABLE)
     if (j < img_size.width && !src_data[j])
     {
         return j;
@@ -1354,12 +1377,12 @@ inline int findEndContourPoint(uchar *src_data, CvSize img_size, int j)
     else
     {
         v_uint8 v_zero = vx_setzero_u8();
-        for (; j <= img_size.width - v_uint8::nlanes; j += v_uint8::nlanes)
+        for (; j <= img_size.width - VTraits<v_uint8>::vlanes(); j += VTraits<v_uint8>::vlanes())
         {
-            unsigned int mask = (unsigned int)v_signmask(vx_load((uchar*)(src_data + j)) == v_zero);
-            if (mask)
+            v_uint8 vmask = (v_eq(vx_load((uchar *)(src_data + j)), v_zero));
+            if (v_check_any(vmask))
             {
-                j += cv::trailingZeros32(mask);
+                j += v_scan_forward(vmask);
                 return j;
             }
         }
@@ -1447,6 +1470,7 @@ icvFindContoursInInterval( const CvArr* src,
     tmp_prev->link = 0;
 
     // First line. None of runs is binded
+    tmp.pt.x = 0;
     tmp.pt.y = 0;
     CV_WRITE_SEQ_ELEM( tmp, writer );
     upper_line = (CvLinkedRunPoint*)CV_GET_WRITTEN_ELEM( writer );
@@ -1789,7 +1813,7 @@ cvFindContours( void*  img,  CvMemStorage*  storage,
     return cvFindContours_Impl(img, storage, firstContour, cntHeaderSize, mode, method, offset, 1);
 }
 
-void cv::findContours( InputOutputArray _image, OutputArrayOfArrays _contours,
+void cv::findContours( InputArray _image, OutputArrayOfArrays _contours,
                    OutputArray _hierarchy, int mode, int method, Point offset )
 {
     CV_INSTRUMENT_REGION();
@@ -1854,7 +1878,7 @@ void cv::findContours( InputOutputArray _image, OutputArrayOfArrays _contours,
     }
 }
 
-void cv::findContours( InputOutputArray _image, OutputArrayOfArrays _contours,
+void cv::findContours( InputArray _image, OutputArrayOfArrays _contours,
                        int mode, int method, Point offset)
 {
     CV_INSTRUMENT_REGION();

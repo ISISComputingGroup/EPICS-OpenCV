@@ -60,7 +60,7 @@ public:
 
     UMatData* allocate(int dims, const int* sizes, int type,
                        void* data0, size_t* step,
-                       int /*flags*/, UMatUsageFlags /*usageFlags*/) const CV_OVERRIDE
+                       AccessFlag /*flags*/, UMatUsageFlags /*usageFlags*/) const CV_OVERRIDE
     {
         size_t total = CV_ELEM_SIZE(type);
         for (int i = dims-1; i >= 0; i--)
@@ -100,7 +100,7 @@ public:
         return u;
     }
 
-    bool allocate(UMatData* u, int /*accessFlags*/, UMatUsageFlags /*usageFlags*/) const CV_OVERRIDE
+    bool allocate(UMatData* u, AccessFlag /*accessFlags*/, UMatUsageFlags /*usageFlags*/) const CV_OVERRIDE
     {
         return (u != NULL);
     }
@@ -206,7 +206,7 @@ void cv::cuda::HostMem::create(int rows_, int cols_, int type_)
         cols = cols_;
         step = elemSize() * cols;
         int sz[] = { rows, cols };
-        size_t steps[] = { step, CV_ELEM_SIZE(type_) };
+        size_t steps[] = { step, (size_t)CV_ELEM_SIZE(type_) };
         flags = updateContinuityFlag(flags, 2, sz, steps);
 
         if (alloc_type == SHARED)

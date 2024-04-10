@@ -260,7 +260,7 @@ namespace cv
 }
 #endif
 
-#ifdef HAVE_IPP
+#if 0 //defined HAVE_IPP
 namespace cv
 {
 
@@ -384,7 +384,7 @@ static bool ocl_sepFilter3x3_8UC1(InputArray _src, OutputArray _dst, int ddepth,
 
     const char * const borderMap[] = { "BORDER_CONSTANT", "BORDER_REPLICATE", "BORDER_REFLECT", 0, "BORDER_REFLECT_101" };
     char build_opts[1024];
-    sprintf(build_opts, "-D %s %s%s", borderMap[borderType],
+    snprintf(build_opts, sizeof(build_opts), "-D %s %s%s", borderMap[borderType],
             ocl::kernelToStr(kernelX, CV_32F, "KERNEL_MATRIX_X").c_str(),
             ocl::kernelToStr(kernelY, CV_32F, "KERNEL_MATRIX_Y").c_str());
 
@@ -415,6 +415,8 @@ void cv::Sobel( InputArray _src, OutputArray _dst, int ddepth, int dx, int dy,
                 int ksize, double scale, double delta, int borderType )
 {
     CV_INSTRUMENT_REGION();
+
+    CV_Assert(!_src.empty());
 
     int stype = _src.type(), sdepth = CV_MAT_DEPTH(stype), cn = CV_MAT_CN(stype);
     if (ddepth < 0)
@@ -457,7 +459,7 @@ void cv::Sobel( InputArray _src, OutputArray _dst, int ddepth, int dx, int dy,
     CV_OVX_RUN(true,
                openvx_sobel(src, dst, dx, dy, ksize, scale, delta, borderType))
 
-    CV_IPP_RUN_FAST(ipp_Deriv(src, dst, dx, dy, ksize, scale, delta, borderType));
+    //CV_IPP_RUN_FAST(ipp_Deriv(src, dst, dx, dy, ksize, scale, delta, borderType));
 
     sepFilter2D(src, dst, ddepth, kx, ky, Point(-1, -1), delta, borderType );
 }
@@ -467,6 +469,8 @@ void cv::Scharr( InputArray _src, OutputArray _dst, int ddepth, int dx, int dy,
                  double scale, double delta, int borderType )
 {
     CV_INSTRUMENT_REGION();
+
+    CV_Assert(!_src.empty());
 
     int stype = _src.type(), sdepth = CV_MAT_DEPTH(stype), cn = CV_MAT_CN(stype);
     if (ddepth < 0)
@@ -507,7 +511,7 @@ void cv::Scharr( InputArray _src, OutputArray _dst, int ddepth, int dx, int dy,
     CALL_HAL(scharr, cv_hal_scharr, src.ptr(), src.step, dst.ptr(), dst.step, src.cols, src.rows, sdepth, ddepth, cn,
              ofs.x, ofs.y, wsz.width - src.cols - ofs.x, wsz.height - src.rows - ofs.y, dx, dy, scale, delta, borderType&~BORDER_ISOLATED);
 
-    CV_IPP_RUN_FAST(ipp_Deriv(src, dst, dx, dy, 0, scale, delta, borderType));
+    //CV_IPP_RUN_FAST(ipp_Deriv(src, dst, dx, dy, 0, scale, delta, borderType));
 
     sepFilter2D( src, dst, ddepth, kx, ky, Point(-1, -1), delta, borderType );
 }
@@ -574,20 +578,20 @@ static bool ocl_Laplacian5(InputArray _src, OutputArray _dst,
         size_t lt2[2] = { tileSizeX, tileSizeY};
         size_t gt2[2] = { lt2[0] * (1 + (size.width - 1) / lt2[0]), lt2[1] };
 
-        char cvt[2][40];
+        char cvt[2][50];
         const char * const borderMap[] = { "BORDER_CONSTANT", "BORDER_REPLICATE", "BORDER_REFLECT", "BORDER_WRAP",
                                            "BORDER_REFLECT_101" };
 
         String opts = cv::format("-D BLK_X=%d -D BLK_Y=%d -D RADIUS=%d%s%s"
-                                 " -D convertToWT=%s -D convertToDT=%s"
-                                 " -D %s -D srcT1=%s -D dstT1=%s -D WT1=%s"
-                                 " -D srcT=%s -D dstT=%s -D WT=%s"
+                                 " -D CONVERT_TO_WT=%s -D CONVERT_TO_DT=%s"
+                                 " -D %s -D SRC_T1=%s -D DST_T1=%s -D WT1=%s"
+                                 " -D SRC_T=%s -D DST_T=%s -D WT=%s"
                                  " -D CN=%d ",
                                  (int)lt2[0], (int)lt2[1], kernelX.cols / 2,
                                  ocl::kernelToStr(kernelX, wdepth, "KERNEL_MATRIX_X").c_str(),
                                  ocl::kernelToStr(kernelY, wdepth, "KERNEL_MATRIX_Y").c_str(),
-                                 ocl::convertTypeStr(sdepth, wdepth, cn, cvt[0]),
-                                 ocl::convertTypeStr(wdepth, ddepth, cn, cvt[1]),
+                                 ocl::convertTypeStr(sdepth, wdepth, cn, cvt[0], sizeof(cvt[0])),
+                                 ocl::convertTypeStr(wdepth, ddepth, cn, cvt[1], sizeof(cvt[1])),
                                  borderMap[borderType],
                                  ocl::typeToStr(sdepth), ocl::typeToStr(ddepth), ocl::typeToStr(wdepth),
                                  ocl::typeToStr(CV_MAKETYPE(sdepth, cn)),
@@ -620,17 +624,17 @@ static bool ocl_Laplacian5(InputArray _src, OutputArray _dst,
     if (!doubleSupport && wdepth == CV_64F)
         return false;
 
-    char cvt[2][40];
+    char cvt[2][50];
     ocl::Kernel k("sumConvert", ocl::imgproc::laplacian5_oclsrc,
                   format("-D ONLY_SUM_CONVERT "
-                         "-D srcT=%s -D WT=%s -D dstT=%s -D coeffT=%s -D wdepth=%d "
-                         "-D convertToWT=%s -D convertToDT=%s%s",
+                         "-D SRC_T=%s -D WT=%s -D DST_T=%s -D COEFF_T=%s -D WDEPTH=%d "
+                         "-D CONVERT_TO_WT=%s -D CONVERT_TO_DT=%s%s",
                          ocl::typeToStr(CV_MAKE_TYPE(depth, kercn)),
                          ocl::typeToStr(CV_MAKE_TYPE(wdepth, kercn)),
                          ocl::typeToStr(CV_MAKE_TYPE(ddepth, kercn)),
                          ocl::typeToStr(wdepth), wdepth,
-                         ocl::convertTypeStr(depth, wdepth, kercn, cvt[0]),
-                         ocl::convertTypeStr(wdepth, ddepth, kercn, cvt[1]),
+                         ocl::convertTypeStr(depth, wdepth, kercn, cvt[0], sizeof(cvt[0])),
+                         ocl::convertTypeStr(wdepth, ddepth, kercn, cvt[1], sizeof(cvt[1])),
                          doubleSupport ? " -D DOUBLE_SUPPORT" : ""));
     if (k.empty())
         return false;
@@ -680,7 +684,7 @@ static bool ocl_Laplacian3_8UC1(InputArray _src, OutputArray _dst, int ddepth,
 
     const char * const borderMap[] = { "BORDER_CONSTANT", "BORDER_REPLICATE", "BORDER_REFLECT", 0, "BORDER_REFLECT_101" };
     char build_opts[1024];
-    sprintf(build_opts, "-D %s %s", borderMap[borderType],
+    snprintf(build_opts, sizeof(build_opts), "-D %s %s", borderMap[borderType],
             ocl::kernelToStr(kernel, CV_32F, "KERNEL_MATRIX").c_str());
 
     ocl::Kernel k("laplacian3_8UC1_cols16_rows2", cv::ocl::imgproc::laplacian3_oclsrc, build_opts);
@@ -785,6 +789,8 @@ void cv::Laplacian( InputArray _src, OutputArray _dst, int ddepth, int ksize,
 {
     CV_INSTRUMENT_REGION();
 
+    CV_Assert(!_src.empty());
+
     int stype = _src.type(), sdepth = CV_MAT_DEPTH(stype), cn = CV_MAT_CN(stype);
     if (ddepth < 0)
         ddepth = sdepth;
@@ -807,20 +813,6 @@ void cv::Laplacian( InputArray _src, OutputArray _dst, int ddepth, int ksize,
     }
 
     CV_IPP_RUN(!(cv::ocl::isOpenCLActivated() && _dst.isUMat()), ipp_Laplacian(_src, _dst, ksize, scale, delta, borderType));
-
-
-#ifdef HAVE_TEGRA_OPTIMIZATION
-    if (tegra::useTegra() && scale == 1.0 && delta == 0)
-    {
-        Mat src = _src.getMat(), dst = _dst.getMat();
-        if (ksize == 1 && tegra::laplace1(src, dst, borderType))
-            return;
-        if (ksize == 3 && tegra::laplace3(src, dst, borderType))
-            return;
-        if (ksize == 5 && tegra::laplace5(src, dst, borderType))
-            return;
-    }
-#endif
 
     if( ksize == 1 || ksize == 3 )
     {
