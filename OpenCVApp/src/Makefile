@@ -60,7 +60,11 @@ install:
 	-$(MKDIR) $(TOP)/lib
 	-$(MKDIR) $(TOP)/lib/$(EPICS_HOST_ARCH)
 	$(CMAKE) -E remove_directory $(TOP)/include
+ifneq ($(wildcard $(OPENCV_INSTALL)/include/opencv4),)
+	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include/opencv4 $(TOP)/include
+else
 	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include $(TOP)/include
+endif
 ifeq ($(findstring linux,$(EPICS_HOST_ARCH)),)
 	$(CP) -f $(OPENCV_INSTALL)/bin/*.exe $(TOP)/bin/$(EPICS_HOST_ARCH)/
 	$(CP) -f $(OPENCV_INSTALL)/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
