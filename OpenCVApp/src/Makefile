@@ -60,7 +60,7 @@ install:
 	-$(MKDIR) $(TOP)/lib
 	-$(MKDIR) $(TOP)/lib/$(EPICS_HOST_ARCH)
 	$(CMAKE) -E remove_directory $(TOP)/include
-ifneq ($(wildcard $(OPENCV_INSTALL)/include/opencv4),)
+ifneq ($(wildcard $(OPENCV_INSTALL)/include/opencv4/*),)
 	@echo Skipping opencv4 prefix
 	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include/opencv4/ $(TOP)/include
 else
