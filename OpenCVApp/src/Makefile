@@ -52,20 +52,21 @@ include $(TOP)/configure/RULES
 #  ADD RULES AFTER THIS LINE
 
 ifdef T_A
-install:
+
+# need to split install rules due to evaluation orders of wildcards and ifeq etc
+.PHONY: cmakeinstall
+
+cmakeinstall:
 	$(CMAKE) $(OPENCV_SRC) -G "$(CMAKE_GENERATOR)" $(CMAKE_PLATFORM) -DOPENCV_INSTALL_BINARIES_PREFIX="" -DCMAKE_INSTALL_PREFIX:PATH="$(OPENCV_INSTALL)" $(CMAKE_CONFIG_FLAGS)
 	$(CMAKE) --build . --target install --config $(CMAKE_CONFIG) $(CMAKE_BUILD_FLAGS)
+
+install: cmakeinstall
 	-$(MKDIR) $(TOP)/bin
 	-$(MKDIR) $(TOP)/bin/$(EPICS_HOST_ARCH)
 	-$(MKDIR) $(TOP)/lib
 	-$(MKDIR) $(TOP)/lib/$(EPICS_HOST_ARCH)
 	$(CMAKE) -E remove_directory $(TOP)/include
-ifneq ($(wildcard $(OPENCV_INSTALL)/include/opencv4/*),)
-	@echo Skipping opencv4 prefix
-	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include/opencv4/ $(TOP)/include
-else
-	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include $(TOP)/include
-endif
+	$(CMAKE) -E copy_directory $(OPENCV_INSTALL)/include/$(notdir $(wildcard $(OPENCV_INSTALL)/include/opencv4))/ $(TOP)/include
 ifeq ($(findstring linux,$(EPICS_HOST_ARCH)),)
 	$(CP) -f $(OPENCV_INSTALL)/bin/*.exe $(TOP)/bin/$(EPICS_HOST_ARCH)/
 	$(CP) -f $(OPENCV_INSTALL)/bin/*.dll $(TOP)/bin/$(EPICS_HOST_ARCH)/
